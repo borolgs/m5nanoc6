@@ -8,10 +8,11 @@
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
+use m5nanoc6::events::EVENTS;
 
 extern crate alloc;
 
@@ -44,12 +45,16 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::wifi::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
-    // TODO: Spawn some tasks
-    let _ = spawner;
+    let config = InputConfig::default().with_pull(Pull::Up);
+    let button = Input::new(peripherals.GPIO9, config);
+
+    spawner.spawn(m5nanoc6::button::button_task(button, EVENTS.publisher().unwrap()).unwrap());
+
+    let mut subscriber = EVENTS.subscriber().unwrap();
 
     loop {
-        Timer::after(Duration::from_secs(1)).await;
-        log::info!("hello from loop");
+        let msg = subscriber.next_message_pure().await;
+        log::info!("got {:?}", msg);
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples

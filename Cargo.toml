@@ -9,20 +9,26 @@ name = "m5nanoc6"
 path = "./src/bin/main.rs"
 
 [dependencies]
+log = "0.4.33"
+
 esp-hal = { version = "~1.1.0", features = ["esp32c6", "unstable", "log-04"] }
-
 esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6"] }
-
+esp-radio = { version = "0.18.0", features = ["esp-alloc", "esp32c6", "unstable", "wifi"] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c6"] }
+esp-alloc = "0.10.0"
 
-embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "tcp", "udp"] }
+esp-println = { version = "0.17.0", features = ["esp32c6", "log-04"] }
+esp-backtrace = { version = "0.19.0", features = ["esp32c6", "panic-handler", "println"] }
+
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
-esp-alloc = "0.10.0"
-# for more networking protocol support see https://crates.io/crates/edge-net
+
 embassy-executor = { version = "0.10.0", features = [] }
+embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "tcp", "udp"] }
 embassy-time = "0.5.0"
-esp-radio = { version = "0.18.0", features = ["esp-alloc", "esp32c6", "unstable", "wifi"] }
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+
 smoltcp = { version = "0.13.0", default-features = false, features = [
   "medium-ethernet",
   "multicast",
@@ -38,9 +44,6 @@ smoltcp = { version = "0.13.0", default-features = false, features = [
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"
-log = "0.4.33"
-esp-println = { version = "0.17.0", features = ["esp32c6", "log-04"] }
-esp-backtrace = { version = "0.19.0", features = ["esp32c6", "panic-handler", "println"] }
 
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html

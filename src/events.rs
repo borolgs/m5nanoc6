@@ -3,6 +3,8 @@
 //! This module imports nothing from the rest of the crate — the dependency only ever points
 //! at it, so tasks can talk to each other without knowing about each other's hardware.
 
+use core::net::Ipv4Addr;
+
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub};
 use embassy_time::Duration;
 
@@ -12,6 +14,7 @@ pub enum Event {
     ButtonDown,
     Env(EnvData),
     Led(LedCmd),
+    Wifi(WifiState),
 }
 
 /// One ENV-Pro reading.
@@ -25,6 +28,27 @@ pub struct EnvData {
     pub pressure: f32,
     /// Ohm
     pub gas_resistance: Option<f32>,
+}
+
+/// Where the Wi-Fi station is in its connect cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiState {
+    /// Sweeping the configured networks.
+    Connecting,
+    Connected {
+        ssid: &'static str,
+        ip: Ipv4Addr,
+    },
+    /// Was associated, lost the access point — a new sweep follows.
+    Disconnected,
+    /// The whole list was exhausted without a lease.
+    Failed,
+}
+
+impl From<WifiState> for Event {
+    fn from(state: WifiState) -> Self {
+        Self::Wifi(state)
+    }
 }
 
 /// What an LED should show, and for how long.
@@ -47,6 +71,11 @@ impl LedCmd {
 
     pub const fn status_blink(count: u16) -> Self {
         Self::Status(true, Pattern::blink(count))
+    }
+
+    /// Blink the status LED until the next command for it.
+    pub const fn status_blink_forever() -> Self {
+        Self::Status(true, Pattern::blink_forever())
     }
 
     pub const fn rgb(color: Rgb) -> Self {

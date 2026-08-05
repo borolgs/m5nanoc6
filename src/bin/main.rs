@@ -8,14 +8,17 @@
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
+use embassy_net::{Config as NetConfig, StackResources};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::rmt::{Rmt, TxChannelConfig, TxChannelCreator};
+use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use m5nanoc6::events::{EVENTS, Event};
 use m5nanoc6::led::{RMT_FREQUENCY, RgbLed};
+use static_cell::StaticCell;
 
 extern crate alloc;
 
@@ -39,9 +42,26 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
-    let (mut _wifi_controller, _interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
+    let (wifi_controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, Default::default())
+        .expect("Failed to initialize Wi-Fi controller");
+
+    {
+        static RESOURCES: StaticCell<StackResources<{ m5nanoc6::wifi::SOCKETS }>> =
+            StaticCell::new();
+        let rng = Rng::new();
+        let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
+        let (stack, runner) = embassy_net::new(
+            interfaces.station,
+            NetConfig::dhcpv4(Default::default()),
+            RESOURCES.init(StackResources::new()),
+            seed,
+        );
+
+        spawner.spawn(m5nanoc6::wifi::net_task(runner).unwrap());
+        spawner.spawn(
+            m5nanoc6::wifi::wifi_task(wifi_controller, stack, EVENTS.publisher().unwrap()).unwrap(),
+        );
+    }
 
     let button = Input::new(
         peripherals.GPIO9,
@@ -91,6 +111,9 @@ async fn main(spawner: Spawner) -> ! {
         match msg {
             Event::Env(env) => {
                 log::info!("[main] receive env {env:?}")
+            }
+            Event::Wifi(state) => {
+                log::info!("[main] receive wifi {state:?}")
             }
             other => log::debug!("[main] receive {other:?}"),
         }

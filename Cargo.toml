@@ -32,19 +32,6 @@ embassy-time = "0.5.0"
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 
-smoltcp = { version = "0.13.0", default-features = false, features = [
-  "medium-ethernet",
-  "multicast",
-  "proto-dhcpv4",
-  "proto-dns",
-  "proto-ipv4",
-  "socket-dns",
-  "socket-icmp",
-  "socket-raw",
-  "socket-tcp",
-  "socket-udp",
-] }
-
 critical-section = "1.2.0"
 static_cell = "2.1.1"
 

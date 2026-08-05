@@ -26,3 +26,5 @@ target/
 **/.DS_Store
 
 wip
+
+.env

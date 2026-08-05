@@ -5,6 +5,10 @@ Firmware for the [M5Stack NanoC6 Dev Kit](https://docs.m5stack.com/en/core/M5Nan
 # Quickstart
 
 ```bash
+# Copy .env and list the networks you want the board to use.
+# They are tried in order on every connect attempt.
+cp .env.example .env
+
 cargo check
 cargo run
 ```

@@ -2,6 +2,18 @@ fn main() {
     linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+    dotenv();
+}
+
+fn dotenv() {
+    println!("cargo:rerun-if-changed=.env");
+
+    if let Ok(iter) = dotenvy::from_filename_iter(".env") {
+        for item in iter {
+            let (key, value) = item.expect("malformed line in .env");
+            println!("cargo:rustc-env={key}={value}");
+        }
+    }
 }
 
 fn linker_be_nice() {

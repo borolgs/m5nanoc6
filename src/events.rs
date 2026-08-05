@@ -4,6 +4,20 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub};
 pub enum Event {
     ButtonUp,
     ButtonDown,
+    Env(EnvData),
+}
+
+/// One ENV-Pro reading.
+#[derive(Debug, Clone, Copy)]
+pub struct EnvData {
+    /// °C
+    pub temperature: f32,
+    /// %RH
+    pub humidity: f32,
+    /// hPa
+    pub pressure: f32,
+    /// Ohm
+    pub gas_resistance: Option<f32>,
 }
 
 const CAP: usize = 4;

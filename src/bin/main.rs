@@ -11,6 +11,7 @@ use embassy_executor::Spawner;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::timer::timg::TimerGroup;
 use m5nanoc6::events::EVENTS;
 
@@ -43,7 +44,15 @@ async fn main(spawner: Spawner) -> ! {
     let config = InputConfig::default().with_pull(Pull::Up);
     let button = Input::new(peripherals.GPIO9, config);
 
+    let i2c = I2c::new(peripherals.I2C0, I2cConfig::default())
+        .expect("Failed to initialize I2C")
+        .with_sda(peripherals.GPIO2)
+        .with_scl(peripherals.GPIO1)
+        .into_async();
+
     spawner.spawn(m5nanoc6::button::button_task(button, EVENTS.publisher().unwrap()).unwrap());
+
+    spawner.spawn(m5nanoc6::env_pro::env_pro_task(i2c, EVENTS.publisher().unwrap()).unwrap());
 
     let mut subscriber = EVENTS.subscriber().unwrap();
 

@@ -25,6 +25,9 @@ Flashing needs hardware; don't run `cargo run` unless the user asks.
   `Event` enum. `CAP`/`SUBS`/`PUBS` are compile-time bounds: bump `SUBS`/`PUBS` when adding
   a subscriber/publisher, otherwise `EVENTS.subscriber()`/`.publisher()` returns `Err` at runtime.
 - `src/button.rs` — `button_task`: debounced GPIO9 input, publishes `ButtonDown`/`ButtonUp`.
+- `src/env_pro.rs` — `env_pro_task`: polls the Unit ENV-Pro (BME688) on the Grove port over I2C
+  (`bosch-bme680`, address 0x77), publishes `Env(EnvData)` every 5s. Re-initializes on read
+  error, so the unit can be hot-plugged.
 - `src/bin/main.rs` — init (clocks, heap, `esp_rtos::start`, Wi-Fi), peripheral setup,
   task spawning, event loop.
 

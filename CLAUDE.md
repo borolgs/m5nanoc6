@@ -21,13 +21,20 @@ Flashing needs hardware; don't run `cargo run` unless the user asks.
 ## Layout
 
 - `src/lib.rs` — crate root (`no_std`), module list only.
-- `src/events.rs` — global `EVENTS` pub/sub channel (`embassy_sync::PubSubChannel`) and the
-  `Event` enum. `CAP`/`SUBS`/`PUBS` are compile-time bounds: bump `SUBS`/`PUBS` when adding
-  a subscriber/publisher, otherwise `EVENTS.subscriber()`/`.publisher()` returns `Err` at runtime.
+- `src/events.rs` — global `EVENTS` pub/sub channel (`embassy_sync::PubSubChannel`), the
+  `Event` enum, and every payload type that travels on it (`EnvData`, and the LED command
+  vocabulary `Rgb`/`Pattern`/`LedCmd`). `CAP`/`SUBS`/`PUBS` are compile-time bounds: bump
+  `SUBS`/`PUBS` when adding a subscriber/publisher, otherwise
+  `EVENTS.subscriber()`/`.publisher()` returns `Err` at runtime.
 - `src/button.rs` — `button_task`: debounced GPIO9 input, publishes `ButtonDown`/`ButtonUp`.
 - `src/env_pro.rs` — `env_pro_task`: polls the Unit ENV-Pro (BME688) on the Grove port over I2C
   (`bosch-bme680`, address 0x77), publishes `Env(EnvData)` every 5s. Re-initializes on read
   error, so the unit can be hot-plugged.
+- `src/led.rs` — on-board LEDs: blue status LED (GPIO7, plain `Output`) and the WS2812 RGB
+  LED (`RgbLed`, data on GPIO20 via RMT, supply gated by GPIO19). WS2812 bit encoding is
+  hand-rolled because `esp-hal-smartled` still pins `esp-hal ~1.0`. `led_task` owns both and
+  plays `Event::Led(LedCmd)`; `Pattern::For`/`Blink { count: Some(_) }` restore the last
+  `Pattern::Solid` value on their own, so publishers fire and forget.
 - `src/bin/main.rs` — init (clocks, heap, `esp_rtos::start`, Wi-Fi), peripheral setup,
   task spawning, event loop.
 
@@ -36,6 +43,9 @@ Flashing needs hardware; don't run `cargo run` unless the user asks.
 - Peripherals are configured in `main.rs` and passed into tasks as `'static` values; tasks
   themselves stay hardware-agnostic beyond the type they receive.
 - Cross-task communication goes through the `EVENTS` channel — not shared statics.
+- `events.rs` owns every type that travels on the bus and imports nothing from the crate —
+  the dependency only ever points at it, never out of it.
+- LEDs are driven by publishing `Event::Led(..)`; nothing outside `led.rs` touches the pins.
 - Tasks are `#[embassy_executor::task]` fns living in their own module.
 - Logging via the `log` crate (`esp-println` backend); level from `ESP_LOG` (`debug` by default).
 - `main.rs` keeps `#![deny(clippy::mem_forget)]` and `#![deny(clippy::large_stack_frames)]` —

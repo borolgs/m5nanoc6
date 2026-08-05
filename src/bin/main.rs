@@ -10,10 +10,12 @@
 use embassy_executor::Spawner;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
-use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::rmt::{Rmt, TxChannelConfig, TxChannelCreator};
 use esp_hal::timer::timg::TimerGroup;
-use m5nanoc6::events::EVENTS;
+use m5nanoc6::events::{EVENTS, Event};
+use m5nanoc6::led::{RMT_FREQUENCY, RgbLed};
 
 extern crate alloc;
 
@@ -41,8 +43,38 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::wifi::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
-    let config = InputConfig::default().with_pull(Pull::Up);
-    let button = Input::new(peripherals.GPIO9, config);
+    let button = Input::new(
+        peripherals.GPIO9,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+
+    spawner.spawn(m5nanoc6::button::button_task(button, EVENTS.publisher().unwrap()).unwrap());
+
+    let (status_led, rgb_led) = {
+        // Blue status LED. `led_task` drives it from here on.
+        let status_led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
+
+        // WS2812 RGB LED: data on GPIO20, supply gated by GPIO19.
+        let rgb_power = Output::new(peripherals.GPIO19, Level::High, OutputConfig::default());
+        let rmt = Rmt::new(peripherals.RMT, RMT_FREQUENCY)
+            .expect("Failed to initialize RMT")
+            .into_async();
+        let rgb_channel = rmt
+            .channel0
+            .configure_tx(
+                &TxChannelConfig::default()
+                    .with_clk_divider(1)
+                    .with_idle_output(true)
+                    .with_idle_output_level(Level::Low),
+            )
+            .expect("Failed to configure the RMT TX channel")
+            .with_pin(peripherals.GPIO20);
+        let rgb_led = RgbLed::new(rgb_channel, rgb_power);
+        (status_led, rgb_led)
+    };
+
+    spawner
+        .spawn(m5nanoc6::led::led_task(status_led, rgb_led, EVENTS.subscriber().unwrap()).unwrap());
 
     let i2c = I2c::new(peripherals.I2C0, I2cConfig::default())
         .expect("Failed to initialize I2C")
@@ -50,14 +82,17 @@ async fn main(spawner: Spawner) -> ! {
         .with_scl(peripherals.GPIO1)
         .into_async();
 
-    spawner.spawn(m5nanoc6::button::button_task(button, EVENTS.publisher().unwrap()).unwrap());
-
     spawner.spawn(m5nanoc6::env_pro::env_pro_task(i2c, EVENTS.publisher().unwrap()).unwrap());
 
     let mut subscriber = EVENTS.subscriber().unwrap();
 
     loop {
         let msg = subscriber.next_message_pure().await;
-        log::info!("got {:?}", msg);
+        match msg {
+            Event::Env(env) => {
+                log::info!("[main] receive env {env:?}")
+            }
+            other => log::debug!("[main] receive {other:?}"),
+        }
     }
 }

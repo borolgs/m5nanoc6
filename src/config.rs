@@ -1,0 +1,85 @@
+//! Everything the build bakes in: tunables from `.cargo/config.toml`, secrets from `.env`.
+//!
+//! `build.rs` forwards every line of `.env` to the compiler, so both arrive as `option_env!`.
+//! Nothing else in the crate reads the environment — the rest of it goes through [`config()`].
+
+use core::str::FromStr;
+
+use embassy_sync::once_lock::OnceLock;
+use embassy_time::Duration;
+
+/// The whole configuration, parsed once on first use.
+pub fn config() -> &'static Config {
+    CONFIG.get_or_init(Config::from_env)
+}
+
+pub struct Config {
+    /// `ssid1,pass1;ssid2,pass2` — read through [`Config::wifi_networks`].
+    wifi_creds: &'static str,
+    /// `123456789:AAE…` from @BotFather. Empty when the notifier is not set up.
+    pub telegram_token: &'static str,
+    /// The one chat every message goes to. Negative for groups.
+    pub telegram_chat_id: &'static str,
+    /// Alarm below this, in °C.
+    pub tg_min_c: f32,
+    /// The alarm clears once the temperature climbs back above this. Without the gap a
+    /// temperature sitting on the threshold would chatter.
+    pub tg_clear_c: f32,
+    /// Between repeats of a standing alarm.
+    pub tg_repeat: Option<Duration>,
+    /// Between silent heartbeats.
+    pub tg_heartbeat: Option<Duration>,
+}
+
+impl Config {
+    /// The networks to try, in order: `ssid1,pass1;ssid2,pass2`.
+    ///
+    /// An entry without a comma is an open network.
+    ///
+    /// Both halves are trimmed, so an SSID or password cannot begin or end with whitespace,
+    /// nor contain a `,` or a `;`.
+    pub fn wifi_networks(&self) -> impl Iterator<Item = (&'static str, &'static str)> {
+        self.wifi_creds
+            .split(';')
+            .map(|entry| match entry.split_once(',') {
+                Some((ssid, password)) => (ssid.trim(), password.trim()),
+                None => (entry.trim(), ""),
+            })
+            .filter(|(ssid, _)| !ssid.is_empty())
+    }
+
+    fn from_env() -> Self {
+        let tg_min_c = number(option_env!("TG_MIN_C"), 10.0);
+
+        Self {
+            wifi_creds: or_empty(option_env!("WIFI_CREDS")),
+            telegram_token: or_empty(option_env!("TELEGRAM_TOKEN")).trim(),
+            telegram_chat_id: or_empty(option_env!("TELEGRAM_CHAT_ID")).trim(),
+            tg_min_c,
+            tg_clear_c: tg_min_c + number(option_env!("TG_HYST_C"), 1.0),
+            tg_repeat: minutes(option_env!("TG_REPEAT_MIN"), 60),
+            tg_heartbeat: minutes(option_env!("TG_HEARTBEAT_MIN"), 360),
+        }
+    }
+}
+
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+const fn or_empty(value: Option<&str>) -> &str {
+    match value {
+        Some(value) => value,
+        None => "",
+    }
+}
+
+fn number<T: FromStr>(value: Option<&str>, default: T) -> T {
+    value
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// `0` disables the interval rather than turning it into a busy loop.
+fn minutes(value: Option<&str>, default: u64) -> Option<Duration> {
+    let minutes = number(value, default);
+    (minutes > 0).then(|| Duration::from_secs(minutes * 60))
+}

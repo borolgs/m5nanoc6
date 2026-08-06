@@ -1,7 +1,6 @@
 //! Wi-Fi station: sweeps the configured networks, brings up DHCP, and reconnects on its own.
 //!
-//! Credentials come from `WIFI_CREDS`, baked in at build time from `.env`. The first network
-//! that both associates and gets a lease wins.
+//! The first network that both associates and gets a lease wins.
 
 use alloc::string::String;
 use core::{future::pending, net::Ipv4Addr};
@@ -12,39 +11,24 @@ use esp_radio::wifi::{
     AuthenticationMethod, Config, Interface, Ssid, WifiController, WifiError, sta::StationConfig,
 };
 
-use crate::events::{LedCmd, Publisher, Rgb, WifiState};
-
-/// `WIFI_CREDS=ssid1,pass1;ssid2,pass2` — see `.env`.
-const CREDS: &str = match option_env!("WIFI_CREDS") {
-    Some(creds) => creds,
-    None => "",
+use crate::{
+    config,
+    events::{LedCmd, Publisher, Rgb, WifiState},
 };
-
-/// The configured networks, in order. An entry without a comma is an open network.
-///
-/// Both halves are trimmed, so `a, b` and `a,b` mean the same thing — which also means an
-/// SSID or password cannot start or end with whitespace, nor contain a `,` or a `;`.
-fn networks() -> impl Iterator<Item = (&'static str, &'static str)> {
-    CREDS
-        .split(';')
-        .map(|entry| match entry.split_once(',') {
-            Some((ssid, password)) => (ssid.trim(), password.trim()),
-            None => (entry.trim(), ""),
-        })
-        .filter(|(ssid, _)| !ssid.is_empty())
-}
 
 /// The configured entry a connect event belongs to, matched the way the driver stores an
 /// SSID — as at most 32 bytes, so an over-long entry compares equal to what it truncated to.
 fn configured_as(connected: Ssid) -> Option<&'static str> {
-    networks()
+    config::config()
+        .wifi_networks()
         .map(|(ssid, _)| ssid)
         .find(|&ssid| Ssid::from(ssid) == connected)
 }
 
-/// Socket slots the stack can hand out: one for DHCP, the rest headroom for the first task
-/// that wants a socket of its own.
-pub const SOCKETS: usize = 3;
+/// Socket slots the stack can hand out: one for DHCP, one for DNS, one for the Telegram
+/// client's TCP connection, and one spare. Both DHCP and DNS go through `sockets.add(..)`
+/// like any other socket, so each of them costs a slot.
+pub const SOCKETS: usize = 4;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DHCP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -68,7 +52,7 @@ pub async fn wifi_task(
     stack: Stack<'static>,
     publisher: Publisher,
 ) {
-    if networks().next().is_none() {
+    if config::config().wifi_networks().next().is_none() {
         log::warn!("No Wi-Fi networks configured — set WIFI_CREDS in .env");
         publisher.publish_immediate(WifiState::Failed.into());
         publisher.publish_immediate(LedCmd::rgb(Rgb::RED).into());
@@ -118,12 +102,12 @@ pub async fn wifi_task(
     }
 }
 
-/// One sweep of [`networks`], returning the network that took us all the way to an IP address.
+/// One sweep of the configured networks, returning the one that took us all the way to an IP.
 async fn connect_any(
     controller: &mut WifiController<'static>,
     stack: &Stack<'static>,
 ) -> Option<(&'static str, Ipv4Addr)> {
-    for (ssid, password) in networks() {
+    for (ssid, password) in config::config().wifi_networks() {
         let mut config = StationConfig::default().with_ssid(ssid);
         config = if password.is_empty() {
             config.with_auth_method(AuthenticationMethod::None)

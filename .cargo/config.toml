@@ -4,6 +4,13 @@ runner = "espflash flash --monitor --chip esp32c6"
 [env]
 ESP_LOG = "debug"
 
+# Telegram notifier thresholds, read in `src/config.rs`. Secrets live in `.env`.
+# See `docs/telegram-bot.md`.
+TG_MIN_C = "10.0"           # alarm below this, in °C
+TG_HYST_C = "1.0"           # the alarm clears at TG_MIN_C + TG_HYST_C
+TG_REPEAT_MIN = "60"        # minutes between repeats of a standing alarm; 0 sends it once
+TG_HEARTBEAT_MIN = "360"    # minutes between silent heartbeats; 0 turns them off
+
 [build]
 rustflags = [
   # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)

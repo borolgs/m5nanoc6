@@ -7,6 +7,8 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use core::future::pending;
+
 use embassy_executor::Spawner;
 use embassy_net::{Config as NetConfig, StackResources};
 use esp_backtrace as _;
@@ -16,7 +18,7 @@ use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::rmt::{Rmt, TxChannelConfig, TxChannelCreator};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
-use m5nanoc6::events::{EVENTS, Event};
+use m5nanoc6::events::EVENTS;
 use m5nanoc6::led::{RMT_FREQUENCY, RgbLed};
 use static_cell::StaticCell;
 
@@ -45,7 +47,7 @@ async fn main(spawner: Spawner) -> ! {
     let (wifi_controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, Default::default())
         .expect("Failed to initialize Wi-Fi controller");
 
-    {
+    let stack = {
         static RESOURCES: StaticCell<StackResources<{ m5nanoc6::wifi::SOCKETS }>> =
             StaticCell::new();
         let rng = Rng::new();
@@ -61,7 +63,9 @@ async fn main(spawner: Spawner) -> ! {
         spawner.spawn(
             m5nanoc6::wifi::wifi_task(wifi_controller, stack, EVENTS.publisher().unwrap()).unwrap(),
         );
-    }
+
+        stack
+    };
 
     let button = Input::new(
         peripherals.GPIO9,
@@ -104,18 +108,12 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(m5nanoc6::env_pro::env_pro_task(i2c, EVENTS.publisher().unwrap()).unwrap());
 
-    let mut subscriber = EVENTS.subscriber().unwrap();
+    spawner.spawn(m5nanoc6::telegram::telegram_task(stack, EVENTS.publisher().unwrap()).unwrap());
 
+    spawner.spawn(m5nanoc6::app::app_task(EVENTS.subscriber().unwrap()).unwrap());
+
+    // Everything happens in the tasks from here on.
     loop {
-        let msg = subscriber.next_message_pure().await;
-        match msg {
-            Event::Env(env) => {
-                log::info!("[main] receive env {env:?}")
-            }
-            Event::Wifi(state) => {
-                log::info!("[main] receive wifi {state:?}")
-            }
-            other => log::debug!("[main] receive {other:?}"),
-        }
+        pending::<()>().await;
     }
 }

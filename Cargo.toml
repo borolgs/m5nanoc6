@@ -27,13 +27,19 @@ embedded-io-async = "0.7.0"
 bosch-bme680 = { version = "1.0.4", features = ["embedded-hal-async"] }
 
 embassy-executor = { version = "0.10.0", features = [] }
-embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "tcp", "udp"] }
+embassy-net = { version = "0.9.1", features = ["dhcpv4", "dns", "medium-ethernet", "tcp", "udp"] }
 embassy-time = "0.5.0"
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"
+
+# Not used here directly: `embedded-tls` 0.18 was written against `der 0.8.0-rc.2`, where
+# `SequenceOf`/`SetOf` were unconditional. In released `der` they sit behind `heapless`, and
+# only a direct dependency can turn that feature on for the whole graph.
+der = { version = "0.8.1", default-features = false, features = ["heapless"] }
+reqwless = { version = "=0.14.0", default-features = false, features = ["embedded-tls", "log"] }
 
 # Host-side only: `build.rs` feeds `.env` to the compiler.
 [build-dependencies]

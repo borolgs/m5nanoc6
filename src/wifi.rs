@@ -12,8 +12,8 @@ use esp_radio::wifi::{
 };
 
 use crate::{
-    config,
-    events::{LedCmd, Publisher, Rgb, WifiState},
+    config, events,
+    events::{LedCmd, Rgb, WifiState},
 };
 
 /// The configured entry a connect event belongs to, matched the way the driver stores an
@@ -47,11 +47,9 @@ pub async fn net_task(mut runner: Runner<'static, Interface<'static>>) -> ! {
 }
 
 #[embassy_executor::task]
-pub async fn wifi_task(
-    mut controller: WifiController<'static>,
-    stack: Stack<'static>,
-    publisher: Publisher,
-) {
+pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'static>) {
+    let publisher = events::publisher();
+
     if config::config().wifi_networks().next().is_none() {
         log::warn!("No Wi-Fi networks configured — set WIFI_CREDS in .env");
         publisher.publish_immediate(WifiState::Failed.into());

@@ -1,10 +1,12 @@
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::Input;
 
-use crate::events::Publisher;
+use crate::events;
 
 #[embassy_executor::task]
-pub async fn button_task(mut button: Input<'static>, publisher: Publisher) {
+pub async fn button_task(mut button: Input<'static>) {
+    let publisher = events::publisher();
+
     loop {
         button.wait_for_low().await;
         log::debug!("Button press detected!");

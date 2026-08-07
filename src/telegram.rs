@@ -26,13 +26,14 @@ use reqwless::{
 use static_cell::StaticCell;
 
 use crate::{
-    config,
-    events::{LedCmd, Notification, Publisher, Rgb, Urgency, next_notification},
+    config, events,
+    events::{LedCmd, Notification, Rgb, Urgency, next_notification},
 };
 
 #[embassy_executor::task]
-pub async fn telegram_task(stack: Stack<'static>, publisher: Publisher) {
+pub async fn telegram_task(stack: Stack<'static>) {
     let config = config::config();
+    let publisher = events::publisher();
 
     if config.telegram_token.is_empty() || config.telegram_chat_id.is_empty() {
         log::warn!("Telegram not configured — see docs/telegram-bot.md");

@@ -196,7 +196,19 @@ pub type Channel = pubsub::PubSubChannel<CriticalSectionRawMutex, Event, CAP, SU
 pub type Publisher = pubsub::Publisher<'static, CriticalSectionRawMutex, Event, CAP, SUBS, PUBS>;
 pub type Subscriber = pubsub::Subscriber<'static, CriticalSectionRawMutex, Event, CAP, SUBS, PUBS>;
 
-pub static EVENTS: Channel = Channel::new();
+static EVENTS: Channel = Channel::new();
+
+/// Panics past `PUBS` — a boot-time failure in the module that added the publisher.
+pub fn publisher() -> Publisher {
+    EVENTS.publisher().expect("too many publishers: raise PUBS")
+}
+
+/// Panics past `SUBS` — a boot-time failure in the module that added the subscriber.
+pub fn subscriber() -> Subscriber {
+    EVENTS
+        .subscriber()
+        .expect("too many subscribers: raise SUBS")
+}
 
 /// Something for a person to read, for whichever notifier is fitted to deliver it.
 ///

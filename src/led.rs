@@ -17,7 +17,7 @@ use esp_hal::{
     time::Rate,
 };
 
-use crate::events::{Event, LedCmd, Pattern, Rgb, Subscriber};
+use crate::events::{self, Event, LedCmd, Pattern, Rgb};
 
 /// RMT source clock the timings below assume: one tick = 12.5 ns.
 pub const RMT_FREQUENCY: Rate = Rate::from_mhz(80);
@@ -209,7 +209,8 @@ async fn wait_until(deadline: Option<Instant>) {
 
 /// Owns both on-board LEDs and plays the effects requested through [`Event::Led`].
 #[embassy_executor::task]
-pub async fn led_task(mut status: Output<'static>, mut rgb: RgbLed, mut events: Subscriber) {
+pub async fn led_task(mut status: Output<'static>, mut rgb: RgbLed) {
+    let mut events = events::subscriber();
     let mut status_anim = Animation::<bool>::new();
     let mut rgb_anim = Animation::<Rgb>::new();
     let mut rgb_retry: Option<Instant> = None;

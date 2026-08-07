@@ -13,12 +13,13 @@ use embassy_time::{Duration, Instant, Timer};
 
 use crate::{
     config,
-    events::{EnvData, Event, Notification, Subscriber, WifiState, notify},
+    events::{self, EnvData, Event, Notification, WifiState, notify},
 };
 
 #[embassy_executor::task]
-pub async fn app_task(mut events: Subscriber) {
+pub async fn app_task() {
     let config = config::config();
+    let mut events = events::subscriber();
 
     log::info!(
         "Alarm below {:.1}C, clears at {:.1}C",

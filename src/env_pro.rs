@@ -2,7 +2,7 @@ use bosch_bme680::{AsyncBme680, Configuration, DeviceAddress, MeasurmentData};
 use embassy_time::{Delay, Duration, Timer};
 use esp_hal::{Async, i2c::master::I2c};
 
-use crate::events::{EnvData, Event, LedCmd, Publisher, Rgb};
+use crate::events::{self, EnvData, Event, LedCmd, Rgb};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -23,7 +23,8 @@ impl From<MeasurmentData> for EnvData {
 }
 
 #[embassy_executor::task]
-pub async fn env_pro_task(i2c: I2c<'static, Async>, publisher: Publisher) {
+pub async fn env_pro_task(i2c: I2c<'static, Async>) {
+    let publisher = events::publisher();
     let mut sensor = AsyncBme680::new(i2c, DeviceAddress::Secondary, Delay, INITIAL_AMBIENT_C);
     let config = Configuration::default();
 

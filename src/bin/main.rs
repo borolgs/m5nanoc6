@@ -18,7 +18,6 @@ use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::rmt::{Rmt, TxChannelConfig, TxChannelCreator};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
-use m5nanoc6::events::EVENTS;
 use m5nanoc6::led::{RMT_FREQUENCY, RgbLed};
 use static_cell::StaticCell;
 
@@ -60,9 +59,7 @@ async fn main(spawner: Spawner) -> ! {
         );
 
         spawner.spawn(m5nanoc6::wifi::net_task(runner).unwrap());
-        spawner.spawn(
-            m5nanoc6::wifi::wifi_task(wifi_controller, stack, EVENTS.publisher().unwrap()).unwrap(),
-        );
+        spawner.spawn(m5nanoc6::wifi::wifi_task(wifi_controller, stack).unwrap());
 
         stack
     };
@@ -72,7 +69,7 @@ async fn main(spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
-    spawner.spawn(m5nanoc6::button::button_task(button, EVENTS.publisher().unwrap()).unwrap());
+    spawner.spawn(m5nanoc6::button::button_task(button).unwrap());
 
     let (status_led, rgb_led) = {
         // Blue status LED. `led_task` drives it from here on.
@@ -97,8 +94,7 @@ async fn main(spawner: Spawner) -> ! {
         (status_led, rgb_led)
     };
 
-    spawner
-        .spawn(m5nanoc6::led::led_task(status_led, rgb_led, EVENTS.subscriber().unwrap()).unwrap());
+    spawner.spawn(m5nanoc6::led::led_task(status_led, rgb_led).unwrap());
 
     let i2c = I2c::new(peripherals.I2C0, I2cConfig::default())
         .expect("Failed to initialize I2C")
@@ -106,11 +102,11 @@ async fn main(spawner: Spawner) -> ! {
         .with_scl(peripherals.GPIO1)
         .into_async();
 
-    spawner.spawn(m5nanoc6::env_pro::env_pro_task(i2c, EVENTS.publisher().unwrap()).unwrap());
+    spawner.spawn(m5nanoc6::env_pro::env_pro_task(i2c).unwrap());
 
-    spawner.spawn(m5nanoc6::telegram::telegram_task(stack, EVENTS.publisher().unwrap()).unwrap());
+    spawner.spawn(m5nanoc6::telegram::telegram_task(stack).unwrap());
 
-    spawner.spawn(m5nanoc6::app::app_task(EVENTS.subscriber().unwrap()).unwrap());
+    spawner.spawn(m5nanoc6::app::app_task().unwrap());
 
     // Everything happens in the tasks from here on.
     loop {

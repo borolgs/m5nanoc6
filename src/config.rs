@@ -22,8 +22,7 @@ pub struct Config {
     pub telegram_chat_id: &'static str,
     /// Alarm below this, in °C.
     pub tg_min_c: f32,
-    /// The alarm clears once the temperature climbs back above this. Without the gap a
-    /// temperature sitting on the threshold would chatter.
+    /// Hysteresis: the alarm clears above this, so a temperature on the threshold can't chatter.
     pub tg_clear_c: f32,
     /// How long a recovery has to hold before it clears the alarm. `None` clears at once.
     pub tg_dwell: Option<Duration>,
@@ -34,9 +33,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// The networks to try, in order: `ssid1,pass1;ssid2,pass2`, an entry without a comma
-    /// being an open one. Both halves are trimmed, so neither can carry leading or trailing
-    /// whitespace, a `,` or a `;`.
+    /// `ssid1,pass1;ssid2,pass2` in order; an entry without a comma is open, both halves trimmed.
     pub fn wifi_networks(&self) -> impl Iterator<Item = (&'static str, &'static str)> {
         self.wifi_creds
             .split(';')

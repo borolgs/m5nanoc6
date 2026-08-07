@@ -5,13 +5,24 @@
 //! the link, send, retry, report the outcome on the LED. See `docs/telegram-bot.md`, including
 //! why certificate verification is off.
 //!
-//! The outbox is a max-heap keyed on [`Urgency`], so an alarm queued behind an info goes out
-//! first without either being lost. One message is in flight at a time and keeps its retry
-//! budget: a louder one that arrives mid-flight is served next, not instead.
+//! The outbox is a max-heap keyed on [`Urgency`] and then on arrival, so an alarm queued behind
+//! an info goes out first and two equally urgent messages keep their order. When it is full the
+//! quietest, oldest message it holds goes — which may be the one being queued.
+//!
+//! One message is in flight at a time and keeps its retry budget. A louder one arriving while
+//! that message waits — for the link, or for its next attempt — takes the link instead: the
+//! waiting message goes back in the outbox, keeping its place in the order but not its budget.
 
-use alloc::{format, string::String};
-use core::{cmp::Ordering, fmt::Write as _, future::pending};
+use alloc::{format, string::String, vec::Vec};
+use core::{
+    cmp::{Ordering, Reverse},
+    fmt::Write as _,
+    future::{Future, pending, poll_fn},
+    sync::atomic::{AtomicU32, Ordering::Relaxed},
+    task::Poll,
+};
 
+use embassy_futures::select::{Either, select};
 use embassy_net::{
     Stack,
     dns::DnsSocket,
@@ -41,19 +52,50 @@ const DEPTH: usize = 4;
 static OUTBOX: PriorityChannel<CriticalSectionRawMutex, Notification, Max, DEPTH> =
     PriorityChannel::new();
 
-/// Hand a message to the notifier. Never blocks, so the caller keeps serving its own channels
-/// while a send is parked on the network.
-pub fn notify(message: Notification) {
+/// Stamped on every message the outbox takes, so equal urgencies keep the order spoken in.
+static SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// Hand a message to the notifier. Never blocks.
+pub fn notify(mut message: Notification) {
+    if !configured() {
+        // Nothing drains the outbox with the notifier off, so it must not fill either.
+        log::debug!("Telegram off, ignoring: {}", message.text);
+        return;
+    }
+
+    message.seq = SEQ.fetch_add(1, Relaxed);
+    enqueue(message);
+}
+
+/// Queues `message`, losing the least worthwhile in hand — possibly `message` itself.
+fn enqueue(message: Notification) {
     let Err(TrySendError::Full(message)) = OUTBOX.try_send(message) else {
         return;
     };
 
-    // Room for a louder message is worth more than every quieter one already waiting.
-    OUTBOX.remove_if(|queued| queued.urgency < message.urgency);
-
-    if let Err(TrySendError::Full(message)) = OUTBOX.try_send(message) {
-        log::warn!("Outbox full, dropping: {}", message.text);
+    // `remove_if` is the only way to look inside the heap and it clones; draining moves.
+    let mut held = Vec::with_capacity(DEPTH + 1);
+    while let Ok(queued) = OUTBOX.try_receive() {
+        held.push(queued);
     }
+    held.push(message);
+
+    // Worth most first, so the quietest and oldest of them ends up last.
+    held.sort_unstable_by_key(|queued| Reverse((queued.urgency, queued.seq)));
+
+    if let Some(dropped) = held.pop() {
+        log::warn!("Outbox full, dropping: {}", dropped.text);
+    }
+
+    for queued in held {
+        let _ = OUTBOX.try_send(queued);
+    }
+}
+
+/// A fresh clone builds with the notifier off, and `telegram_task` then never runs.
+fn configured() -> bool {
+    let config = config::config();
+    !config.telegram_token.is_empty() && !config.telegram_chat_id.is_empty()
 }
 
 /// Something for a person to read.
@@ -61,12 +103,9 @@ pub fn notify(message: Notification) {
 pub struct Notification {
     pub text: String,
     pub urgency: Urgency,
+    seq: u32,
 }
 
-/// How badly the device wants a message delivered. A transport reads its own settings off
-/// this — how loudly to ring, how long to keep trying — and nothing above it needs to know
-/// what those are.
-///
 /// Declared quietest first: this order *is* the outbox's priority rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Urgency {
@@ -80,32 +119,33 @@ pub enum Urgency {
 
 impl Notification {
     pub fn alarm(text: String) -> Self {
-        Self {
-            text,
-            urgency: Urgency::Alarm,
-        }
+        Self::new(text, Urgency::Alarm)
     }
 
     pub fn info(text: String) -> Self {
-        Self {
-            text,
-            urgency: Urgency::Info,
-        }
+        Self::new(text, Urgency::Info)
     }
 
     pub fn perishable(text: String) -> Self {
+        Self::new(text, Urgency::Perishable)
+    }
+
+    /// `seq` means nothing until [`notify`] stamps it, which is where the order begins.
+    fn new(text: String, urgency: Urgency) -> Self {
         Self {
             text,
-            urgency: Urgency::Perishable,
+            urgency,
+            seq: 0,
         }
     }
 }
 
-/// Urgency alone, because that is what the outbox sorts on. "Equal" therefore means equally
-/// urgent, not the same message — the heap doesn't care, but a reader might.
+/// Loudest first, then earliest — a max-heap orders equal keys however it likes.
 impl Ord for Notification {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.urgency.cmp(&other.urgency)
+        self.urgency
+            .cmp(&other.urgency)
+            .then_with(|| other.seq.cmp(&self.seq))
     }
 }
 
@@ -117,7 +157,7 @@ impl PartialOrd for Notification {
 
 impl PartialEq for Notification {
     fn eq(&self, other: &Self) -> bool {
-        self.urgency == other.urgency
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -127,7 +167,7 @@ impl Eq for Notification {}
 pub async fn telegram_task(stack: Stack<'static>) {
     let config = config::config();
 
-    if config.telegram_token.is_empty() || config.telegram_chat_id.is_empty() {
+    if !configured() {
         log::warn!("Telegram not configured — see docs/telegram-bot.md");
         // Park instead of returning, the way `wifi_task` does without credentials.
         return pending().await;
@@ -140,41 +180,60 @@ pub async fn telegram_task(stack: Stack<'static>) {
         let mut attempts = 0;
 
         loop {
-            // Link state comes from the stack, not `wifi.rs`: a send parks this task for up to
-            // half a minute, and what matters is whether there is a link now.
+            // Link state comes from the stack: a send can park this task for half a minute.
             if !stack.is_config_up() {
                 // The link can stay down for hours; this would arrive reading as current.
                 if message.urgency == Urgency::Perishable {
                     log::warn!("Telegram: link down, dropping: {}", message.text);
                     break;
                 }
-                stack.wait_config_up().await;
+                if preempted(message.urgency, stack.wait_config_up()).await {
+                    enqueue(message);
+                    break;
+                }
                 continue;
             }
 
-            match bot.send(&message).await {
-                Ok(()) => {
-                    log::info!("Telegram: sent {}", message.text);
-                    led::send(LedCmd::blink(Rgb::BLUE, 1));
-                    break;
-                }
-                Err(e) => {
-                    led::send(LedCmd::blink(Rgb::YELLOW, 2));
+            let Err(e) = bot.send(&message).await else {
+                log::info!("Telegram: sent {}", message.text);
+                led::send(LedCmd::blink(Rgb::BLUE, 1));
+                break;
+            };
 
-                    match backoff(&mut attempts, message.urgency) {
-                        Some(delay) => {
-                            log::warn!("Telegram: {e}, retrying in {}s", delay.as_secs());
-                            Timer::after(delay).await;
-                        }
-                        None => {
-                            log::warn!("Telegram: {e}, giving up on: {}", message.text);
-                            break;
-                        }
-                    }
-                }
+            led::send(LedCmd::blink(Rgb::YELLOW, 2));
+
+            let Some(delay) = backoff(&mut attempts, message.urgency) else {
+                log::warn!("Telegram: {e}, giving up on: {}", message.text);
+                break;
+            };
+
+            log::warn!("Telegram: {e}, retrying in {}s", delay.as_secs());
+
+            if preempted(message.urgency, Timer::after(delay)).await {
+                enqueue(message);
+                break;
             }
         }
     }
+}
+
+/// Waits for `wait`, unless a louder message turns up first and takes the link instead.
+async fn preempted(urgency: Urgency, wait: impl Future<Output = ()>) -> bool {
+    matches!(select(wait, louder_than(urgency)).await, Either::Second(()))
+}
+
+/// Resolves once the outbox holds something more urgent than `urgency`.
+async fn louder_than(urgency: Urgency) {
+    poll_fn(|cx| {
+        // Registers the receiver waker, so the next `enqueue` polls this again.
+        let _ = OUTBOX.poll_ready_to_receive(cx);
+
+        match OUTBOX.try_peek() {
+            Ok(next) if next.urgency > urgency => Poll::Ready(()),
+            _ => Poll::Pending,
+        }
+    })
+    .await
 }
 
 /// Waits between the attempts at one message; the last one repeats.
@@ -209,8 +268,7 @@ fn backoff(attempts: &mut u8, urgency: Urgency) -> Option<Duration> {
 
 const HOST: &str = "api.telegram.org";
 
-/// TCP buffers behind the one connection at a time. The reply is a short JSON object; the
-/// receive side is sized for the TLS certificate flight instead.
+/// The reply is a short JSON object; RX is sized for the TLS certificate flight instead.
 const TCP_TX: usize = 1536;
 const TCP_RX: usize = 4096;
 
@@ -220,9 +278,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Give up on a socket that goes quiet well before [`SEND_TIMEOUT`] would.
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The Telegram Bot API over HTTPS, one connection per message.
-///
-/// The API takes plain `GET` with query parameters, so there is no JSON to encode.
+/// The Telegram Bot API over HTTPS: plain `GET` with query parameters, so no JSON to encode.
 struct Bot {
     token: &'static str,
     chat_id: &'static str,
@@ -235,8 +291,7 @@ struct Bot {
 
 impl Bot {
     fn new(stack: Stack<'static>, token: &'static str, chat_id: &'static str) -> Self {
-        // `.bss`, not the heap: ~27 KiB for the lifetime of the task would be most of the
-        // 64 KiB `heap_allocator!` gives out.
+        // `.bss`, not the heap: ~27 KiB is most of the 64 KiB `heap_allocator!` gives out.
         static TLS_RX: StaticCell<[u8; 16640]> = StaticCell::new();
         static TLS_TX: StaticCell<[u8; 4096]> = StaticCell::new();
         static HEADERS: StaticCell<[u8; 1024]> = StaticCell::new();
@@ -286,9 +341,7 @@ impl Bot {
             ..
         } = self;
 
-        // A fresh seed per handshake: `reqwless` derives the whole session's randomness from
-        // it. The hardware RNG is a true one while the RF subsystem is on, which it is — we
-        // only get here with a link.
+        // `reqwless` derives the session's randomness from this seed; the RNG is true with RF on.
         let rng = Rng::new();
         let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
 
@@ -330,10 +383,7 @@ impl core::fmt::Display for SendError {
     }
 }
 
-/// Percent-encode into `out`, escaping everything outside the unreserved set.
-///
-/// Byte-wise, not char-wise: `°` and Cyrillic are multi-byte UTF-8 and each byte needs its
-/// own escape.
+/// Percent-encode byte-wise, not char-wise: multi-byte UTF-8 needs an escape per byte.
 fn encode(out: &mut String, value: &str) {
     for &byte in value.as_bytes() {
         match byte {

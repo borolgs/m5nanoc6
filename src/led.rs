@@ -24,10 +24,7 @@ const DEPTH: usize = 8;
 
 static COMMANDS: channel::Channel<CriticalSectionRawMutex, LedCmd, DEPTH> = channel::Channel::new();
 
-/// Queue a command for [`led_task`].
-///
-/// Never blocks: the task awaits `Timer`s while playing a pattern, so it is a slow drainer by
-/// design, and no producer should wait on an LED. A dropped command is cosmetic.
+/// [`led_task`] awaits `Timer`s while playing a pattern, so a full queue drops rather than waits.
 pub fn send(cmd: LedCmd) {
     if COMMANDS.try_send(cmd).is_err() {
         log::warn!("LED queue full, dropping {cmd:?}");
@@ -78,7 +75,6 @@ impl LedCmd {
     }
 }
 
-/// A 24-bit color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {
     pub r: u8,
@@ -102,9 +98,6 @@ impl Rgb {
     }
 
     /// The same hue re-scaled so that a channel at [`Rgb::LEVEL`] ends up at `level`.
-    ///
-    /// Channels brighter than [`Rgb::LEVEL`] saturate at full scale rather than wrapping,
-    /// so the hue can only wash out, never flip.
     pub const fn scaled(self, level: u8) -> Self {
         const fn scale(c: u8, level: u8) -> u8 {
             let scaled = (c as u32 * level as u32) / Rgb::LEVEL as u32;
@@ -130,8 +123,7 @@ pub enum Pattern {
     Solid,
     /// Hold for this long, then restore the steady state.
     For(Duration),
-    /// Alternate between the value and off. `count: None` blinks until the next command;
-    /// `Some(n)` plays `n` on-phases and then restores the steady state.
+    /// Alternate value and off; `None` until the next command, `Some(n)` for `n` on-phases.
     Blink {
         on: Duration,
         off: Duration,
@@ -144,7 +136,6 @@ impl Pattern {
     pub const DEFAULT_OFF: Duration = Duration::from_millis(150);
 
     /// Blink `count` times at the default rate, then restore the steady state.
-    /// `count: 0` is a no-op: the steady state is kept as-is.
     pub const fn blink(count: u16) -> Self {
         Self::Blink {
             on: Self::DEFAULT_ON,
@@ -174,8 +165,7 @@ const T1L: u16 = 36; // 0.45 µs
 
 const BITS: usize = 24;
 
-/// The low period that latches a frame, in RMT ticks (2 × 300 µs). Sent inside the frame, so
-/// that two `set` calls in quick succession cannot merge into one chain update.
+/// Low period that latches a frame (2 × 300 µs), sent inside it so two `set`s can't merge.
 const RESET: u16 = 24_000;
 
 /// How long the WS2812 needs after its supply is switched on, before the first frame.
@@ -337,8 +327,7 @@ impl<T: LedValue> Animation<T> {
         })
     }
 
-    /// Put back the value a failed write consumed — a `Solid` one would otherwise stay wrong
-    /// until some later command happened to change it.
+    /// Put back the value a failed write consumed, so a `Solid` one doesn't stay wrong.
     fn retry_output(&mut self) {
         self.dirty = true;
     }

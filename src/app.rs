@@ -4,9 +4,6 @@
 //! [`App`] is the device's state, and `app_task` the only place it changes. Delivery is none of
 //! its business: this task only drops a [`Notification`] in the outbox, so a send that parks for
 //! half a minute cannot make it miss a reading.
-//!
-//! The outbox lives in `telegram.rs` because that is what consumes it, which is why this module
-//! names the notifier it does. Move the outbox somewhere neutral if a second one ever appears.
 
 use alloc::{format, string::String};
 use core::future::pending;
@@ -127,8 +124,7 @@ impl App {
         Some(self.speak(Notification::alarm(text), now))
     }
 
-    /// One line on the first connection after boot, so a reboot loop shows up in the chat
-    /// instead of hiding behind the heartbeat interval.
+    /// One line on the first connection after boot, so a reboot loop shows up in the chat.
     fn on_wifi(&mut self, state: WifiState, now: Instant) -> Option<Notification> {
         let WifiState::Connected { ssid, .. } = state else {
             // Or the next heartbeat would name a network the device has left.

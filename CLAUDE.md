@@ -57,8 +57,10 @@ stays private, so only the producing module can publish.
 - Cross-task communication goes through channels, not shared statics. Pick the primitive to
   match the cargo: `Watch` for state (latest value, never lost, but the *sequence* is not
   guaranteed — never count transitions off one), `PubSubChannel` for edges, `Channel` +
-  `try_send` for commands whose loss is cosmetic, `PriorityChannel` for work that must not be
-  dropped. Separate channels means no topic can evict another's traffic.
+  `try_send` for commands whose loss is cosmetic, `PriorityChannel` for work where the loudest
+  goes first. Every bounded channel is lossy once it fills; what a module owes is a stated rule
+  for *which* item goes and a log line when one does. Separate channels means no topic can evict
+  another's traffic.
 - Never block a producer on a consumer. `try_send`, `publish_immediate` and `Watch::send` all
   return immediately; `send().await` waits on the *slowest* consumer, and a task that both
   publishes and consumes can deadlock the firmware that way during a Wi-Fi flap.

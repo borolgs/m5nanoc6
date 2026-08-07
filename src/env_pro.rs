@@ -1,9 +1,7 @@
 //! Unit ENV-Pro (BME688) on the Grove port, over I2C.
 //!
-//! A reading is state, not an event: only the latest one means anything, and a reader that
-//! starts late — or misses a sample — wants the current value, not a queue of old ones. So
-//! [`env_pro_task`] publishes into a [`Watch`], where [`Receiver::try_get`] hands a late
-//! arrival the last reading straight away instead of the next sample interval of nothing.
+//! A reading is state: only the latest one means anything, so it goes out on a [`Watch`] and a
+//! late reader gets the current value rather than a queue of old ones.
 //!
 //! A failed read re-initializes the sensor, so the unit can be unplugged and plugged back in.
 
@@ -23,20 +21,16 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// Seed for the heater-resistance calculation; the driver self-corrects after the first read.
 const INITIAL_AMBIENT_C: i32 = 20;
 
-/// `app_task`, plus one spare.
 const RECEIVERS: usize = 2;
 
 static READINGS: Watch<CriticalSectionRawMutex, EnvData, RECEIVERS> = Watch::new();
 
-/// Follow the readings. Panics past `RECEIVERS` — a boot-time failure in the module that
-/// added the receiver.
 pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, EnvData, RECEIVERS> {
     READINGS
         .receiver()
         .expect("too many ENV-Pro receivers: raise RECEIVERS")
 }
 
-/// One ENV-Pro reading.
 #[derive(Debug, Clone, Copy)]
 pub struct EnvData {
     /// °C

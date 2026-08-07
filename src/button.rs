@@ -1,8 +1,7 @@
 //! The front button on GPIO9: pulled up, so a press reads low.
 //!
 //! Presses are edges, not state — a `Watch<bool>` would swallow a double-tap — so they go out
-//! on a small [`PubSubChannel`]. Nothing subscribes yet, and until something does this costs
-//! nothing: `publish_immediate` with no subscribers is a no-op.
+//! on a small [`PubSubChannel`]. Nothing subscribes yet.
 
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -18,16 +17,12 @@ const PUBS: usize = 1;
 static PRESSES: PubSubChannel<CriticalSectionRawMutex, ButtonEvent, CAP, SUBS, PUBS> =
     PubSubChannel::new();
 
-/// Follow the button. Panics past `SUBS` — a boot-time failure in the module that added the
-/// subscriber.
 pub fn subscribe() -> Subscriber<'static, CriticalSectionRawMutex, ButtonEvent, CAP, SUBS, PUBS> {
     PRESSES
         .subscriber()
         .expect("too many button subscribers: raise SUBS")
 }
 
-/// The likely endgame is debouncing these into gestures — `Press`, `LongPress`, `DoubleTap` —
-/// which are still edges, and would still be published from here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonEvent {
     Down,

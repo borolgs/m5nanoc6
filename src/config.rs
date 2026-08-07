@@ -30,6 +30,12 @@ pub struct Config {
     pub tg_repeat: Option<Duration>,
     /// Between silent heartbeats.
     pub tg_heartbeat: Option<Duration>,
+    /// Between ENV-Pro readings.
+    pub env_sample: Duration,
+    /// Before the ENV-Pro is re-initialized after a failure.
+    pub env_retry: Duration,
+    /// Seed for the heater-resistance calculation; the driver self-corrects after the first read.
+    pub env_ambient_c: i32,
 }
 
 impl Config {
@@ -56,6 +62,9 @@ impl Config {
             tg_dwell: minutes(option_env!("TG_DWELL_MIN"), 5),
             tg_repeat: minutes(option_env!("TG_REPEAT_MIN"), 60),
             tg_heartbeat: minutes(option_env!("TG_HEARTBEAT_MIN"), 360),
+            env_sample: seconds(option_env!("ENV_SAMPLE_SEC"), 5),
+            env_retry: seconds(option_env!("ENV_RETRY_SEC"), 5),
+            env_ambient_c: number(option_env!("ENV_AMBIENT_C"), 20),
         }
     }
 }
@@ -72,4 +81,9 @@ fn number<T: FromStr>(value: Option<&str>, default: T) -> T {
 fn minutes(value: Option<&str>, default: u64) -> Option<Duration> {
     let minutes = number(value, default);
     (minutes > 0).then(|| Duration::from_secs(minutes * 60))
+}
+
+/// Floored at one second: this interval can't be disabled, and `0` would be a busy loop.
+fn seconds(value: Option<&str>, default: u64) -> Duration {
+    Duration::from_secs(number(value, default).max(1))
 }

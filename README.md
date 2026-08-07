@@ -2,12 +2,9 @@
 
 A room watchdog on the [M5Stack NanoC6 Dev Kit](https://docs.m5stack.com/en/core/M5NanoC6)
 (ESP32-C6). It polls temperature, humidity and pressure from an ENV-Pro (BME688) unit and
-pushes a loud Telegram alarm the moment the room goes cold — a dead boiler in January is the
-case it exists for. Otherwise it sends a silent heartbeat, so silence in the chat means the
-device died.
+pushes a Telegram alarm the moment the room goes cold.
 
-`no_std` Rust on `esp-hal` + `embassy`, with `esp-radio` for Wi-Fi. Tasks are independent and
-talk to each other over one pub/sub event bus.
+`no_std` Rust on `esp-hal` + `embassy`, with `esp-radio` for Wi-Fi.
 
 # Quickstart
 

@@ -6,11 +6,16 @@ ESP_LOG = "debug"
 
 # Telegram notifier thresholds, read in `src/config.rs`. Secrets live in `.env`.
 # See `docs/telegram-bot.md`.
-TG_MIN_C = "10.0"           # alarm below this, in °C
-TG_HYST_C = "1.0"           # the alarm clears at TG_MIN_C + TG_HYST_C
-TG_DWELL_MIN = "5"          # minutes an alarm stands before a recovery can clear it; 0 clears at once
-TG_REPEAT_MIN = "60"        # minutes between repeats of a standing alarm; 0 sends it once
-TG_HEARTBEAT_MIN = "360"    # minutes between silent heartbeats; 0 turns them off
+TG_MIN_C = "10.0" # alarm below this, in °C
+TG_HYST_C = "1.0" # the alarm clears at TG_MIN_C + TG_HYST_C
+TG_DWELL_MIN = "5" # minutes an alarm stands before a recovery can clear it; 0 clears at once
+TG_REPEAT_MIN = "60" # minutes between repeats of a standing alarm; 0 sends it once
+TG_HEARTBEAT_MIN = "360" # minutes between silent heartbeats; 0 turns them off
+
+# Unit ENV-Pro, read in `src/config.rs`.
+ENV_SAMPLE_SEC = "60" # seconds between readings; floored at 1
+ENV_RETRY_SEC = "5" # seconds before a failed sensor is re-initialized; floored at 1
+ENV_AMBIENT_C = "20" # heater-resistance seed in °C; the driver self-corrects after one read
 
 [build]
 rustflags = [

@@ -203,7 +203,7 @@ pub async fn telegram_task(stack: Stack<'static>) {
             led::send(LedCmd::blink(Rgb::YELLOW, 2));
 
             let Some(delay) = backoff(&mut attempts, message.urgency) else {
-                log::warn!("Telegram: {e}, giving up on: {}", message.text);
+                log::error!("Telegram: {e}, giving up on: {}", message.text);
                 break;
             };
 

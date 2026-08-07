@@ -10,16 +10,13 @@ use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     watch::{Receiver, Watch},
 };
-use embassy_time::{Delay, Duration, Timer};
+use embassy_time::{Delay, Timer};
 use esp_hal::{Async, i2c::master::I2c};
 
-use crate::led::{self, LedCmd, Rgb};
-
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
-const RETRY_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Seed for the heater-resistance calculation; the driver self-corrects after the first read.
-const INITIAL_AMBIENT_C: i32 = 20;
+use crate::{
+    config,
+    led::{self, LedCmd, Rgb},
+};
 
 const RECEIVERS: usize = 2;
 
@@ -45,15 +42,16 @@ pub struct EnvData {
 
 #[embassy_executor::task]
 pub async fn env_pro_task(i2c: I2c<'static, Async>) {
+    let cfg = config::config();
     let readings = READINGS.sender();
-    let mut sensor = AsyncBme680::new(i2c, DeviceAddress::Secondary, Delay, INITIAL_AMBIENT_C);
-    let config = Configuration::default();
+    let mut sensor = AsyncBme680::new(i2c, DeviceAddress::Secondary, Delay, cfg.env_ambient_c);
+    let sensor_config = Configuration::default();
 
     loop {
-        if let Err(e) = sensor.initialize(&config).await {
+        if let Err(e) = sensor.initialize(&sensor_config).await {
             log::warn!("ENV-Pro init failed: {e:?}");
             led::send(LedCmd::blink(Rgb::RED, 3));
-            Timer::after(RETRY_INTERVAL).await;
+            Timer::after(cfg.env_retry).await;
             continue;
         }
         log::info!("ENV-Pro initialized");
@@ -67,11 +65,11 @@ pub async fn env_pro_task(i2c: I2c<'static, Async>) {
                 Err(e) => {
                     log::warn!("ENV-Pro measure failed, re-initializing: {e:?}");
                     led::send(LedCmd::blink(Rgb::RED, 3));
-                    Timer::after(RETRY_INTERVAL).await;
+                    Timer::after(cfg.env_retry).await;
                     break;
                 }
             }
-            Timer::after(SAMPLE_INTERVAL).await;
+            Timer::after(cfg.env_sample).await;
         }
     }
 }

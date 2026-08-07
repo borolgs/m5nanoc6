@@ -1,14 +1,16 @@
 //! On-board LEDs of the NanoC6: the blue status LED on GPIO7, a plain push-pull output, and
 //! one WS2812 RGB LED on GPIO20 clocked out by the RMT peripheral, its supply gated by GPIO19.
 //!
-//! Both belong to [`led_task`], which plays [`Event::Led`] commands. Timed and finite-count
-//! effects restore the last steady value on their own, so publishers can fire and forget.
+//! Both belong to [`led_task`], which plays the [`LedCmd`]s anyone drops in through [`send`].
+//! Timed and finite-count effects restore the last steady value on their own, so callers can
+//! fire and forget.
 //!
 //! `esp-hal-smartled` still pins `esp-hal ~1.0`, so the bit encoding lives here instead.
 
 use core::future::pending;
 
 use embassy_futures::select::{Either, select};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel};
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::{
     Async,
@@ -17,7 +19,149 @@ use esp_hal::{
     time::Rate,
 };
 
-use crate::events::{self, Event, LedCmd, Pattern, Rgb};
+/// A failed Wi-Fi sweep fires three commands back to back; this is room for a few of those.
+const DEPTH: usize = 8;
+
+static COMMANDS: channel::Channel<CriticalSectionRawMutex, LedCmd, DEPTH> = channel::Channel::new();
+
+/// Queue a command for [`led_task`].
+///
+/// Never blocks: the task awaits `Timer`s while playing a pattern, so it is a slow drainer by
+/// design, and no producer should wait on an LED. A dropped command is cosmetic.
+pub fn send(cmd: LedCmd) {
+    if COMMANDS.try_send(cmd).is_err() {
+        log::warn!("LED queue full, dropping {cmd:?}");
+    }
+}
+
+/// What an LED should show, and for how long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedCmd {
+    /// The blue status LED on GPIO7.
+    Status(bool, Pattern),
+    /// The WS2812 RGB LED on GPIO20.
+    Rgb(Rgb, Pattern),
+}
+
+impl LedCmd {
+    pub const fn status(on: bool) -> Self {
+        Self::Status(on, Pattern::Solid)
+    }
+
+    pub const fn status_for(on: bool, duration: Duration) -> Self {
+        Self::Status(on, Pattern::For(duration))
+    }
+
+    pub const fn status_blink(count: u16) -> Self {
+        Self::Status(true, Pattern::blink(count))
+    }
+
+    /// Blink the status LED until the next command for it.
+    pub const fn status_blink_forever() -> Self {
+        Self::Status(true, Pattern::blink_forever())
+    }
+
+    pub const fn rgb(color: Rgb) -> Self {
+        Self::Rgb(color, Pattern::Solid)
+    }
+
+    pub const fn rgb_for(color: Rgb, duration: Duration) -> Self {
+        Self::Rgb(color, Pattern::For(duration))
+    }
+
+    pub const fn blink(color: Rgb, count: u16) -> Self {
+        Self::Rgb(color, Pattern::blink(count))
+    }
+
+    pub const fn blink_forever(color: Rgb) -> Self {
+        Self::Rgb(color, Pattern::blink_forever())
+    }
+}
+
+/// A 24-bit color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb {
+    /// The palette below is deliberately dim — the WS2812 at full scale is blinding.
+    pub const LEVEL: u8 = 32;
+
+    pub const OFF: Self = Self::new(0, 0, 0);
+    pub const RED: Self = Self::new(Self::LEVEL, 0, 0);
+    pub const GREEN: Self = Self::new(0, Self::LEVEL, 0);
+    pub const BLUE: Self = Self::new(0, 0, Self::LEVEL);
+    pub const YELLOW: Self = Self::new(Self::LEVEL, Self::LEVEL, 0);
+    pub const WHITE: Self = Self::new(Self::LEVEL, Self::LEVEL, Self::LEVEL);
+
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    /// The same hue re-scaled so that a channel at [`Rgb::LEVEL`] ends up at `level`.
+    ///
+    /// Channels brighter than [`Rgb::LEVEL`] saturate at full scale rather than wrapping,
+    /// so the hue can only wash out, never flip.
+    pub const fn scaled(self, level: u8) -> Self {
+        const fn scale(c: u8, level: u8) -> u8 {
+            let scaled = (c as u32 * level as u32) / Rgb::LEVEL as u32;
+            if scaled > u8::MAX as u32 {
+                u8::MAX
+            } else {
+                scaled as u8
+            }
+        }
+
+        Self::new(
+            scale(self.r, level),
+            scale(self.g, level),
+            scale(self.b, level),
+        )
+    }
+}
+
+/// How long an LED holds the value it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pattern {
+    /// Hold until the next command. This becomes the LED's steady state.
+    Solid,
+    /// Hold for this long, then restore the steady state.
+    For(Duration),
+    /// Alternate between the value and off. `count: None` blinks until the next command;
+    /// `Some(n)` plays `n` on-phases and then restores the steady state.
+    Blink {
+        on: Duration,
+        off: Duration,
+        count: Option<u16>,
+    },
+}
+
+impl Pattern {
+    pub const DEFAULT_ON: Duration = Duration::from_millis(150);
+    pub const DEFAULT_OFF: Duration = Duration::from_millis(150);
+
+    /// Blink `count` times at the default rate, then restore the steady state.
+    /// `count: 0` is a no-op: the steady state is kept as-is.
+    pub const fn blink(count: u16) -> Self {
+        Self::Blink {
+            on: Self::DEFAULT_ON,
+            off: Self::DEFAULT_OFF,
+            count: Some(count),
+        }
+    }
+
+    /// Blink at the default rate until the next command for that LED.
+    pub const fn blink_forever() -> Self {
+        Self::Blink {
+            on: Self::DEFAULT_ON,
+            off: Self::DEFAULT_OFF,
+            count: None,
+        }
+    }
+}
 
 /// RMT source clock the timings below assume: one tick = 12.5 ns.
 pub const RMT_FREQUENCY: Rate = Rate::from_mhz(80);
@@ -207,10 +351,9 @@ async fn wait_until(deadline: Option<Instant>) {
     }
 }
 
-/// Owns both on-board LEDs and plays the effects requested through [`Event::Led`].
+/// Owns both on-board LEDs and plays the effects requested through [`send`].
 #[embassy_executor::task]
 pub async fn led_task(mut status: Output<'static>, mut rgb: RgbLed) {
-    let mut events = events::subscriber();
     let mut status_anim = Animation::<bool>::new();
     let mut rgb_anim = Animation::<Rgb>::new();
     let mut rgb_retry: Option<Instant> = None;
@@ -238,15 +381,14 @@ pub async fn led_task(mut status: Output<'static>, mut rgb: RgbLed) {
             .flatten()
             .min();
 
-        match select(events.next_message_pure(), wait_until(deadline)).await {
-            Either::First(Event::Led(cmd)) => {
+        match select(COMMANDS.receive(), wait_until(deadline)).await {
+            Either::First(cmd) => {
                 let now = Instant::now();
                 match cmd {
                     LedCmd::Status(on, pattern) => status_anim.apply(on, pattern, now),
                     LedCmd::Rgb(color, pattern) => rgb_anim.apply(color, pattern, now),
                 }
             }
-            Either::First(_) => {}
             Either::Second(()) => {
                 let now = Instant::now();
                 status_anim.poll(now);

@@ -2,7 +2,10 @@ use bosch_bme680::{AsyncBme680, Configuration, DeviceAddress, MeasurmentData};
 use embassy_time::{Delay, Duration, Timer};
 use esp_hal::{Async, i2c::master::I2c};
 
-use crate::events::{self, EnvData, Event, LedCmd, Rgb};
+use crate::{
+    events::{self, EnvData, Event},
+    led::{self, LedCmd, Rgb},
+};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -31,7 +34,7 @@ pub async fn env_pro_task(i2c: I2c<'static, Async>) {
     loop {
         if let Err(e) = sensor.initialize(&config).await {
             log::warn!("ENV-Pro init failed: {e:?}");
-            publisher.publish_immediate(LedCmd::blink(Rgb::RED, 3).into());
+            led::send(LedCmd::blink(Rgb::RED, 3));
             Timer::after(RETRY_INTERVAL).await;
             continue;
         }
@@ -41,11 +44,11 @@ pub async fn env_pro_task(i2c: I2c<'static, Async>) {
             match sensor.measure().await {
                 Ok(data) => {
                     publisher.publish_immediate(Event::Env(data.into()));
-                    publisher.publish_immediate(LedCmd::blink(Rgb::GREEN, 1).into());
+                    led::send(LedCmd::blink(Rgb::GREEN, 1));
                 }
                 Err(e) => {
                     log::warn!("ENV-Pro measure failed, re-initializing: {e:?}");
-                    publisher.publish_immediate(LedCmd::blink(Rgb::RED, 3).into());
+                    led::send(LedCmd::blink(Rgb::RED, 3));
                     Timer::after(RETRY_INTERVAL).await;
                     break;
                 }

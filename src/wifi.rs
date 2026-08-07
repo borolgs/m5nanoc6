@@ -13,7 +13,8 @@ use esp_radio::wifi::{
 
 use crate::{
     config, events,
-    events::{LedCmd, Rgb, WifiState},
+    events::WifiState,
+    led::{self, LedCmd, Rgb},
 };
 
 /// The configured entry a connect event belongs to, matched the way the driver stores an
@@ -53,7 +54,7 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
     if config::config().wifi_networks().next().is_none() {
         log::warn!("No Wi-Fi networks configured — set WIFI_CREDS in .env");
         publisher.publish_immediate(WifiState::Failed.into());
-        publisher.publish_immediate(LedCmd::rgb(Rgb::RED).into());
+        led::send(LedCmd::rgb(Rgb::RED));
         // Park instead of returning: dropping the controller would deinitialize the radio
         // underneath the interface `net_task` still holds.
         pending::<()>().await;
@@ -63,7 +64,7 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
 
     loop {
         publisher.publish_immediate(WifiState::Connecting.into());
-        publisher.publish_immediate(LedCmd::status_blink_forever().into());
+        led::send(LedCmd::status_blink_forever());
 
         let Some((ssid, ip)) = connect_any(&mut controller, &stack).await else {
             log::error!(
@@ -71,8 +72,8 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
                 backoff.as_secs()
             );
             publisher.publish_immediate(WifiState::Failed.into());
-            publisher.publish_immediate(LedCmd::status(false).into());
-            publisher.publish_immediate(LedCmd::rgb(Rgb::RED).into());
+            led::send(LedCmd::status(false));
+            led::send(LedCmd::rgb(Rgb::RED));
             Timer::after(backoff).await;
             backoff = (backoff * 2).min(RETRY_MAX);
             continue;
@@ -85,8 +86,8 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
             controller.channel().ok().map(|(channel, _)| channel),
         );
 
-        publisher.publish_immediate(LedCmd::rgb(Rgb::OFF).into());
-        publisher.publish_immediate(LedCmd::status(false).into());
+        led::send(LedCmd::rgb(Rgb::OFF));
+        led::send(LedCmd::status(false));
         publisher.publish_immediate(WifiState::Connected { ssid, ip }.into());
 
         if let Err(e) = controller.wait_for_disconnect_async().await {
@@ -95,7 +96,7 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
 
         log::warn!("Wi-Fi disconnected from {ssid}, reconnecting");
         publisher.publish_immediate(WifiState::Disconnected.into());
-        publisher.publish_immediate(LedCmd::status(false).into());
+        led::send(LedCmd::status(false));
         Timer::after(RECONNECT_DELAY).await;
     }
 }

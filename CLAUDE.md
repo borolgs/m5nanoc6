@@ -23,21 +23,26 @@ Flashing needs hardware; don't run `cargo run` unless the user asks.
 Every module opens with a `//!` header holding its own design rationale — read that before
 editing it, and put new rationale there rather than here.
 
+There is no central bus. Each module owns the channel its own traffic goes out on, the
+payload types that travel on it, and the accessor others reach it through; the `static` itself
+stays private, so only the producing module can publish.
+
 - `src/lib.rs` — crate root (`no_std`), module list only.
-- `src/events.rs` — the `EVENTS` bus, the `OUTBOX`, and every type that travels on either.
-  `CAP`/`SUBS`/`PUBS` (8/5/6) are compile-time bounds: bump `SUBS`/`PUBS` when adding a
-  subscriber/publisher, or `EVENTS.subscriber()`/`.publisher()` returns `Err` at runtime.
 - `src/config.rs` — the only module that reads the environment; hands out `&'static Config`.
-- `src/button.rs` — `button_task`: debounced GPIO9, publishes `ButtonDown`/`ButtonUp`.
-- `src/env_pro.rs` — `env_pro_task`: Unit ENV-Pro (BME688) on the Grove port over I2C, publishes
-  `Env(EnvData)`. Re-initializes on read error, so the unit can be hot-plugged.
+- `src/button.rs` — `button_task`: debounced GPIO9. Owns a `PubSubChannel<ButtonEvent>` and
+  `button::subscribe()`. Nothing subscribes yet.
+- `src/env_pro.rs` — `env_pro_task`: Unit ENV-Pro (BME688) on the Grove port over I2C. Owns a
+  `Watch<EnvData>` and `env_pro::subscribe()`. Re-initializes on read error, so the unit can be
+  hot-plugged.
 - `src/led.rs` — `led_task`: blue status LED (GPIO7) and the WS2812 RGB LED (GPIO20 via RMT,
-  supply gated by GPIO19).
+  supply gated by GPIO19). Owns a `Channel<LedCmd>` and `led::send()`.
 - `src/wifi.rs` — `wifi_task`: sweeps the configured networks, waits for a DHCPv4 lease,
-  publishes `Wifi(WifiState)`, reconnects on its own. `net_task` runs the `embassy-net` stack.
+  reconnects on its own. Owns a `Watch<WifiState>` and `wifi::subscribe()`. `net_task` runs the
+  `embassy-net` stack.
 - `src/app.rs` — the policy layer: thresholds, the heartbeat schedule, the wording of every
   message. The one place a rule about what the device *does* belongs.
-- `src/telegram.rs` — the notifier currently fitted: outbox, link, send, retry.
+- `src/telegram.rs` — the notifier currently fitted: link, send, retry. Owns the outbox — a
+  `PriorityChannel<Notification, Max, 4>` — and `telegram::notify()`.
 - `build.rs` — forwards every line of `.env` to the compiler as `cargo:rustc-env`. A missing
   `.env` is not an error: a fresh clone builds with Wi-Fi and the notifier off.
 - `src/bin/main.rs` — wiring only: init, peripheral setup, task spawning. No logic.
@@ -49,18 +54,27 @@ editing it, and put new rationale there rather than here.
 
 - Peripherals are configured in `main.rs` and passed into tasks as `'static` values; tasks
   themselves stay hardware-agnostic beyond the type they receive.
-- Cross-task communication goes through the `EVENTS` channel — not shared statics. It is lossy,
-  so a task keeps whatever it needs locally instead of expecting to re-read it. The one
-  exception is `events::OUTBOX`, a `Signal`: replacement there goes by
-  `Notification::supersedes`, not arrival order.
+- Cross-task communication goes through channels, not shared statics. Pick the primitive to
+  match the cargo: `Watch` for state (latest value, never lost, but the *sequence* is not
+  guaranteed — never count transitions off one), `PubSubChannel` for edges, `Channel` +
+  `try_send` for commands whose loss is cosmetic, `PriorityChannel` for work that must not be
+  dropped. Separate channels means no topic can evict another's traffic.
+- Never block a producer on a consumer. `try_send`, `publish_immediate` and `Watch::send` all
+  return immediately; `send().await` waits on the *slowest* consumer, and a task that both
+  publishes and consumes can deadlock the firmware that way during a Wi-Fi flap.
+- A task acquires its handles at task start, not as spawn arguments — the same way it reaches
+  `config::config()`. Arguments are what a task *owns* (peripherals, `Stack`); channels are what
+  everyone *shares*. The `.expect()` on a receiver count is a boot-time panic in the module that
+  caused it.
+- There is no total order between topics. Anything time-sensitive stamps `Instant::now()` where
+  it is received, and nothing leans on one topic arriving before another.
 - What the device decides lives in `app.rs`; a module below it does one thing and does not grow
-  policy. They meet at `events.rs` and nowhere else: `app.rs` names no transport, `telegram.rs`
-  no policy. A second notifier should drop in beside it without `app.rs` changing.
-- `events.rs` owns every type that travels on the bus and imports nothing from the crate —
-  the dependency only ever points at it, never out of it.
+  policy. `app.rs` names `telegram::notify` only because the outbox lives with its consumer —
+  if a second notifier ever appears, move the outbox to a neutral module rather than teaching
+  `app.rs` about both.
 - Build-time settings are read in `config.rs` and nowhere else; the rest of the crate gets them
   from `config::config()`. Tunables belong in `.cargo/config.toml`; `.env` is for secrets only.
-- LEDs are driven by publishing `Event::Led(..)`; nothing outside `led.rs` touches the pins.
+- LEDs are driven by `led::send(..)`; nothing outside `led.rs` touches the pins.
   A finite `Blink`/`For` falls back to the last `Solid` value, so clear a steady color with a
   `Solid` command before playing a one-shot on top of it.
 - Tasks are `#[embassy_executor::task]` fns living in their own module.

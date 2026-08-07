@@ -7,7 +7,6 @@ pub mod app;
 pub mod button;
 pub mod config;
 pub mod env_pro;
-pub mod events;
 pub mod led;
 pub mod telegram;
 pub mod wifi;

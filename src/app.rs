@@ -12,16 +12,17 @@ use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Instant, Timer};
 
 use crate::{
-    config, env_pro,
-    env_pro::EnvData,
-    events::{self, Event, Notification, WifiState, notify},
+    config,
+    env_pro::{self, EnvData},
+    events::{Notification, notify},
+    wifi::{self, WifiState},
 };
 
 #[embassy_executor::task]
 pub async fn app_task() {
     let config = config::config();
-    let mut events = events::subscriber();
     let mut env = env_pro::subscribe();
+    let mut wifi = wifi::subscribe();
 
     log::info!(
         "Alarm below {:.1}C, clears at {:.1}C",
@@ -32,21 +33,12 @@ pub async fn app_task() {
     let mut app = App::new(config);
 
     loop {
-        let produced = match select3(
-            env.changed(),
-            events.next_message_pure(),
-            sleep_until(app.deadline()),
-        )
-        .await
-        {
-            Either3::First(reading) => app.on_env(reading, Instant::now()),
-            Either3::Second(Event::Wifi(state)) => app.on_wifi(state, Instant::now()),
-            Either3::Second(other) => {
-                log::debug!("[app] {other:?}");
-                None
-            }
-            Either3::Third(()) => app.on_timeout(Instant::now()),
-        };
+        let produced =
+            match select3(env.changed(), wifi.changed(), sleep_until(app.deadline())).await {
+                Either3::First(reading) => app.on_env(reading, Instant::now()),
+                Either3::Second(state) => app.on_wifi(state, Instant::now()),
+                Either3::Third(()) => app.on_timeout(Instant::now()),
+            };
 
         if let Some(message) = produced {
             notify(message);

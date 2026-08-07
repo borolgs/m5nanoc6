@@ -1,21 +1,57 @@
 //! Wi-Fi station: sweeps the configured networks, brings up DHCP, and reconnects on its own.
 //!
 //! The first network that both associates and gets a lease wins.
+//!
+//! Where the station is is state, so it goes out on a [`Watch`]: readers get the current
+//! answer, never a stale one. The sequence is not guaranteed — a `Connecting` immediately
+//! followed by a `Failed` may present as only the `Failed` — so read it as a state, and never
+//! count retries off it.
 
 use alloc::string::String;
 use core::{future::pending, net::Ipv4Addr};
 
 use embassy_net::{Runner, Stack};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    watch::{Receiver, Watch},
+};
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_radio::wifi::{
     AuthenticationMethod, Config, Interface, Ssid, WifiController, WifiError, sta::StationConfig,
 };
 
 use crate::{
-    config, events,
-    events::WifiState,
+    config,
     led::{self, LedCmd, Rgb},
 };
+
+/// `app_task`, plus one spare.
+const RECEIVERS: usize = 2;
+
+static STATE: Watch<CriticalSectionRawMutex, WifiState, RECEIVERS> = Watch::new();
+
+/// Follow the station's state. Panics past `RECEIVERS` — a boot-time failure in the module
+/// that added the receiver.
+pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, WifiState, RECEIVERS> {
+    STATE
+        .receiver()
+        .expect("too many Wi-Fi receivers: raise RECEIVERS")
+}
+
+/// Where the Wi-Fi station is in its connect cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiState {
+    /// Sweeping the configured networks.
+    Connecting,
+    Connected {
+        ssid: &'static str,
+        ip: Ipv4Addr,
+    },
+    /// Was associated, lost the access point — a new sweep follows.
+    Disconnected,
+    /// The whole list was exhausted without a lease.
+    Failed,
+}
 
 /// The configured entry a connect event belongs to, matched the way the driver stores an
 /// SSID — as at most 32 bytes, so an over-long entry compares equal to what it truncated to.
@@ -49,11 +85,11 @@ pub async fn net_task(mut runner: Runner<'static, Interface<'static>>) -> ! {
 
 #[embassy_executor::task]
 pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'static>) {
-    let publisher = events::publisher();
+    let state = STATE.sender();
 
     if config::config().wifi_networks().next().is_none() {
         log::warn!("No Wi-Fi networks configured — set WIFI_CREDS in .env");
-        publisher.publish_immediate(WifiState::Failed.into());
+        state.send(WifiState::Failed);
         led::send(LedCmd::rgb(Rgb::RED));
         // Park instead of returning: dropping the controller would deinitialize the radio
         // underneath the interface `net_task` still holds.
@@ -63,7 +99,7 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
     let mut backoff = RETRY_MIN;
 
     loop {
-        publisher.publish_immediate(WifiState::Connecting.into());
+        state.send(WifiState::Connecting);
         led::send(LedCmd::status_blink_forever());
 
         let Some((ssid, ip)) = connect_any(&mut controller, &stack).await else {
@@ -71,7 +107,7 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
                 "No configured Wi-Fi network reachable, retrying in {}s",
                 backoff.as_secs()
             );
-            publisher.publish_immediate(WifiState::Failed.into());
+            state.send(WifiState::Failed);
             led::send(LedCmd::status(false));
             led::send(LedCmd::rgb(Rgb::RED));
             Timer::after(backoff).await;
@@ -88,14 +124,14 @@ pub async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'st
 
         led::send(LedCmd::rgb(Rgb::OFF));
         led::send(LedCmd::status(false));
-        publisher.publish_immediate(WifiState::Connected { ssid, ip }.into());
+        state.send(WifiState::Connected { ssid, ip });
 
         if let Err(e) = controller.wait_for_disconnect_async().await {
             log::warn!("Waiting for the Wi-Fi disconnect event failed: {e:?}");
         }
 
         log::warn!("Wi-Fi disconnected from {ssid}, reconnecting");
-        publisher.publish_immediate(WifiState::Disconnected.into());
+        state.send(WifiState::Disconnected);
         led::send(LedCmd::status(false));
         Timer::after(RECONNECT_DELAY).await;
     }

@@ -5,7 +5,6 @@
 //! at it, so tasks can talk to each other without knowing about each other's hardware.
 
 use alloc::string::String;
-use core::net::Ipv4Addr;
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub, signal::Signal};
 
@@ -13,28 +12,6 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub, signal:
 pub enum Event {
     ButtonUp,
     ButtonDown,
-    Wifi(WifiState),
-}
-
-/// Where the Wi-Fi station is in its connect cycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WifiState {
-    /// Sweeping the configured networks.
-    Connecting,
-    Connected {
-        ssid: &'static str,
-        ip: Ipv4Addr,
-    },
-    /// Was associated, lost the access point — a new sweep follows.
-    Disconnected,
-    /// The whole list was exhausted without a lease.
-    Failed,
-}
-
-impl From<WifiState> for Event {
-    fn from(state: WifiState) -> Self {
-        Self::Wifi(state)
-    }
 }
 
 const CAP: usize = 8;

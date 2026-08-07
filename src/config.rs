@@ -25,6 +25,8 @@ pub struct Config {
     /// The alarm clears once the temperature climbs back above this. Without the gap a
     /// temperature sitting on the threshold would chatter.
     pub tg_clear_c: f32,
+    /// How long a recovery has to hold before it clears the alarm. `None` clears at once.
+    pub tg_dwell: Option<Duration>,
     /// Between repeats of a standing alarm.
     pub tg_repeat: Option<Duration>,
     /// Between silent heartbeats.
@@ -32,12 +34,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// The networks to try, in order: `ssid1,pass1;ssid2,pass2`.
-    ///
-    /// An entry without a comma is an open network.
-    ///
-    /// Both halves are trimmed, so an SSID or password cannot begin or end with whitespace,
-    /// nor contain a `,` or a `;`.
+    /// The networks to try, in order: `ssid1,pass1;ssid2,pass2`, an entry without a comma
+    /// being an open one. Both halves are trimmed, so neither can carry leading or trailing
+    /// whitespace, a `,` or a `;`.
     pub fn wifi_networks(&self) -> impl Iterator<Item = (&'static str, &'static str)> {
         self.wifi_creds
             .split(';')
@@ -52,11 +51,12 @@ impl Config {
         let tg_min_c = number(option_env!("TG_MIN_C"), 10.0);
 
         Self {
-            wifi_creds: or_empty(option_env!("WIFI_CREDS")),
-            telegram_token: or_empty(option_env!("TELEGRAM_TOKEN")).trim(),
-            telegram_chat_id: or_empty(option_env!("TELEGRAM_CHAT_ID")).trim(),
+            wifi_creds: option_env!("WIFI_CREDS").unwrap_or(""),
+            telegram_token: option_env!("TELEGRAM_TOKEN").unwrap_or("").trim(),
+            telegram_chat_id: option_env!("TELEGRAM_CHAT_ID").unwrap_or("").trim(),
             tg_min_c,
             tg_clear_c: tg_min_c + number(option_env!("TG_HYST_C"), 1.0),
+            tg_dwell: minutes(option_env!("TG_DWELL_MIN"), 5),
             tg_repeat: minutes(option_env!("TG_REPEAT_MIN"), 60),
             tg_heartbeat: minutes(option_env!("TG_HEARTBEAT_MIN"), 360),
         }
@@ -64,13 +64,6 @@ impl Config {
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
-
-const fn or_empty(value: Option<&str>) -> &str {
-    match value {
-        Some(value) => value,
-        None => "",
-    }
-}
 
 fn number<T: FromStr>(value: Option<&str>, default: T) -> T {
     value

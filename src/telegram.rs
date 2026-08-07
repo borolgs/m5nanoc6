@@ -1,13 +1,14 @@
-//! Telegram client: takes a [`Notification`] and gets it delivered.
+//! Telegram client: takes a [`Notification`] off the outbox and gets it delivered.
 //!
-//! What to say and when is [`crate::app`]'s business; this module only knows how to say it —
-//! wait for the link, send, retry, report the outcome on the LED. See `docs/telegram-bot.md`,
-//! including why certificate verification is off.
+//! What to say and when was decided upstream; this module only knows how to say it — wait for
+//! the link, send, retry, report the outcome on the LED. See `docs/telegram-bot.md`, including
+//! why certificate verification is off.
 
 use alloc::{format, string::String};
 use core::{
     fmt::Write as _,
     future::{Future, pending},
+    pin::pin,
 };
 
 use embassy_futures::select::{Either, select};
@@ -16,7 +17,6 @@ use embassy_net::{
     dns::DnsSocket,
     tcp::client::{TcpClient, TcpClientState},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_hal::rng::Rng;
 use reqwless::{
@@ -27,7 +27,7 @@ use static_cell::StaticCell;
 
 use crate::{
     config,
-    events::{LedCmd, Publisher, Rgb},
+    events::{LedCmd, Notification, Publisher, Rgb, Urgency, next_notification},
 };
 
 #[embassy_executor::task]
@@ -41,32 +41,42 @@ pub async fn telegram_task(stack: Stack<'static>, publisher: Publisher) {
     }
 
     let mut bot = Bot::new(stack, config.telegram_token, config.telegram_chat_id);
-    let mut outgoing = Pending::next().await;
+    let mut outgoing = Pending::first().await;
 
     loop {
         // Link state comes from the stack, not the bus: the bus is lossy and a send can park
         // this task long enough to miss a `Wifi` event outright.
         if !stack.is_config_up() {
-            outgoing.wait_or_replace(stack.wait_config_up()).await;
+            // The link can stay down for hours; this would arrive reading as current.
+            if outgoing.message.urgency == Urgency::Perishable {
+                log::warn!("Telegram: link down, dropping: {}", outgoing.message.text);
+                outgoing = outgoing.done().await;
+            } else {
+                outgoing.wait_or_replace(stack.wait_config_up()).await;
+            }
             continue;
         }
 
-        match bot.send(&outgoing.message).await {
+        let sent = bot.send(&outgoing.message).await;
+
+        match sent {
             Ok(()) => {
                 log::info!("Telegram: sent {}", outgoing.message.text);
                 publisher.publish_immediate(LedCmd::blink(Rgb::BLUE, 1).into());
-                outgoing = Pending::next().await;
+                outgoing = outgoing.done().await;
             }
             Err(e) => {
                 publisher.publish_immediate(LedCmd::blink(Rgb::YELLOW, 2).into());
-                match outgoing.backoff() {
+                let again = outgoing.backoff();
+
+                match again {
                     Some(delay) => {
                         log::warn!("Telegram: {e}, retrying in {}s", delay.as_secs());
                         outgoing.wait_or_replace(Timer::after(delay)).await;
                     }
                     None => {
                         log::warn!("Telegram: {e}, giving up on: {}", outgoing.message.text);
-                        outgoing = Pending::next().await;
+                        outgoing = outgoing.done().await;
                     }
                 }
             }
@@ -74,89 +84,81 @@ pub async fn telegram_task(stack: Stack<'static>, publisher: Publisher) {
     }
 }
 
-/// The one message waiting to go out. A newer one replaces it instead of queueing behind it:
-/// an alarm matters more than the heartbeat it displaces, and a recovery more than the alarm
-/// before it.
-static OUTBOX: Signal<CriticalSectionRawMutex, Notification> = Signal::new();
-
-/// Hand a message to [`telegram_task`]. Never blocks, so the caller keeps serving the bus
-/// while a send is parked on the network.
-pub fn notify(message: Notification) {
-    if let Some(dropped) = OUTBOX.try_take() {
-        log::warn!(
-            "Telegram: dropping an undelivered message: {}",
-            dropped.text
-        );
-    }
-    OUTBOX.signal(message);
-}
-
-pub struct Notification {
-    text: String,
-    /// `disable_notification`: delivered as a badge, with no sound or vibration.
-    silent: bool,
-    /// Attempts past the first before the message is given up on.
-    retries: u8,
-}
-
-impl Notification {
-    pub fn loud(text: String) -> Self {
-        Self {
-            text,
-            silent: false,
-            retries: BACKOFF.len() as u8,
-        }
-    }
-
-    pub fn silent(text: String) -> Self {
-        Self {
-            silent: true,
-            ..Self::loud(text)
-        }
-    }
-
-    /// Drop the message rather than retry it, for one that goes stale — a heartbeat's
-    /// replacement is due soon enough, and a stale "alive" is worse than none at all.
-    pub fn no_retry(self) -> Self {
-        Self { retries: 0, ..self }
-    }
-}
-
-/// Waits between the attempts at one message.
+/// Waits between the attempts at one message; the last one repeats.
 const BACKOFF: [Duration; 3] = [
     Duration::from_secs(5),
     Duration::from_secs(15),
     Duration::from_secs(45),
 ];
 
+/// Attempts past the first; an alarm gives up after ~15 min so it cannot starve the rest.
+const fn retries(urgency: Urgency) -> u8 {
+    match urgency {
+        Urgency::Alarm => 20,
+        Urgency::Info => BACKOFF.len() as u8,
+        Urgency::Perishable => 0,
+    }
+}
+
+/// `disable_notification`: delivered as a badge, with no sound or vibration.
+const fn disable_notification(urgency: Urgency) -> bool {
+    !matches!(urgency, Urgency::Alarm)
+}
+
 /// The message being delivered, and what it has cost so far.
 struct Pending {
     message: Notification,
     attempts: u8,
+    /// Off the outbox but not superseding, so it waits its turn rather than being lost.
+    held: Option<Notification>,
 }
 
 impl Pending {
-    async fn next() -> Self {
+    async fn first() -> Self {
         Self {
-            message: OUTBOX.wait().await,
+            message: next_notification().await,
             attempts: 0,
+            held: None,
         }
     }
 
-    /// Wait for `until`, unless a newer message arrives first and takes this one's place.
+    /// Done with this message, delivered or not: on to the one held back, or to the wait.
+    async fn done(self) -> Self {
+        match self.held {
+            Some(message) => Self {
+                message,
+                attempts: 0,
+                held: None,
+            },
+            None => Self::first().await,
+        }
+    }
+
+    /// Wait for `until`, unless a message that supersedes this one arrives first.
     async fn wait_or_replace(&mut self, until: impl Future<Output = ()>) {
-        if let Either::Second(newer) = select(until, OUTBOX.wait()).await {
-            log::warn!("Telegram: giving up on: {}", self.message.text);
-            self.message = newer;
-            self.attempts = 0;
+        let mut until = pin!(until);
+
+        loop {
+            match select(until.as_mut(), next_notification()).await {
+                Either::First(()) => return,
+                Either::Second(newer) if newer.supersedes(&self.message) => {
+                    log::warn!("Telegram: giving up on: {}", self.message.text);
+                    self.message = newer;
+                    self.attempts = 0;
+                    return;
+                }
+                Either::Second(other) => {
+                    self.held = Some(Notification::keep(self.held.take(), other))
+                }
+            }
         }
     }
 
     /// How long to wait before trying again, or `None` once the budget is spent.
     fn backoff(&mut self) -> Option<Duration> {
-        (self.attempts < self.message.retries).then(|| {
+        (self.attempts < retries(self.message.urgency)).then(|| {
             let delay = BACKOFF[usize::from(self.attempts).min(BACKOFF.len() - 1)];
-            self.attempts += 1;
+            self.attempts = self.attempts.saturating_add(1);
             delay
         })
     }
@@ -190,9 +192,8 @@ struct Bot {
 
 impl Bot {
     fn new(stack: Stack<'static>, token: &'static str, chat_id: &'static str) -> Self {
-        // `.bss`, not the heap: ~27 KiB held for the lifetime of the task would be most of
-        // the 64 KiB `heap_allocator!` gives out. `TLS_RX` is the knob if RAM runs short —
-        // 16640 is the largest TLS 1.3 record, but the handshake fits in 8192.
+        // `.bss`, not the heap: ~27 KiB for the lifetime of the task would be most of the
+        // 64 KiB `heap_allocator!` gives out.
         static TLS_RX: StaticCell<[u8; 16640]> = StaticCell::new();
         static TLS_TX: StaticCell<[u8; 4096]> = StaticCell::new();
         static HEADERS: StaticCell<[u8; 1024]> = StaticCell::new();
@@ -224,7 +225,7 @@ impl Bot {
     fn url(&self, message: &Notification) -> String {
         let mut url = format!("https://{HOST}/bot{}/sendMessage?chat_id=", self.token);
         encode(&mut url, self.chat_id);
-        if message.silent {
+        if disable_notification(message.urgency) {
             url.push_str("&disable_notification=true");
         }
         url.push_str("&text=");

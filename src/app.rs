@@ -1,25 +1,19 @@
 //! What the device does with what it hears: the alarm thresholds, the heartbeat schedule, the
 //! wording of every message.
 //!
-//! [`App`] is the device's state, and `app_task` the only place it changes. Getting a message
-//! delivered belongs to [`crate::telegram`] — nothing here awaits the network, so a send that
-//! parks for half a minute cannot make this task miss an event.
-//!
-//! The heartbeat is what makes silence in the chat mean something: an alarm-only device is
-//! indistinguishable from a dead one. Its limit is real — a heartbeat proves liveness only
-//! when it arrives, and nothing here can notice this device's own death. See
-//! `docs/telegram-bot.md`.
+//! [`App`] is the device's state, and `app_task` the only place it changes. Delivery belongs to
+//! whichever notifier is fitted — this task only drops a [`Notification`] in the outbox, so a
+//! send that parks for half a minute cannot make it miss an event.
 
 use alloc::{format, string::String};
 use core::future::pending;
 
 use embassy_futures::select::{Either, select};
-use embassy_time::{Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
 
 use crate::{
     config,
-    events::{EnvData, Event, Subscriber, WifiState},
-    telegram::{self, Notification},
+    events::{EnvData, Event, Notification, Subscriber, WifiState, notify},
 };
 
 #[embassy_executor::task]
@@ -36,8 +30,8 @@ pub async fn app_task(mut events: Subscriber) {
 
     loop {
         let produced = match select(events.next_message_pure(), sleep_until(app.deadline())).await {
-            Either::First(Event::Env(env)) => app.on_env(env),
-            Either::First(Event::Wifi(state)) => app.on_wifi(state),
+            Either::First(Event::Env(env)) => app.on_env(env, Instant::now()),
+            Either::First(Event::Wifi(state)) => app.on_wifi(state, Instant::now()),
             Either::First(other) => {
                 log::debug!("[app] {other:?}");
                 None
@@ -46,7 +40,7 @@ pub async fn app_task(mut events: Subscriber) {
         };
 
         if let Some(message) = produced {
-            telegram::notify(message);
+            notify(message);
         }
     }
 }
@@ -58,16 +52,22 @@ async fn sleep_until(deadline: Option<Instant>) {
     }
 }
 
-/// Everything the device knows about itself, and what it decides to say about it.
+/// Past this there is no reading — the ENV-Pro samples every few seconds.
+const SENSOR_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How often a heartbeat due with no link looks for one, instead of spending its interval.
+const LINK_RETRY: Duration = Duration::from_secs(60);
+
 struct App {
     config: &'static config::Config,
     boot: Instant,
-    latest: Option<EnvData>,
+    latest: Option<(EnvData, Instant)>,
     ssid: Option<&'static str>,
+    announced: bool,
     cold: bool,
+    last_flip: Option<Instant>,
     last_alarm: Instant,
     next_heartbeat: Option<Instant>,
-    announced: bool,
 }
 
 impl App {
@@ -79,37 +79,56 @@ impl App {
             boot,
             latest: None,
             ssid: None,
+            announced: false,
             cold: false,
+            last_flip: None,
             last_alarm: boot,
             next_heartbeat: config.tg_heartbeat.map(|every| boot + every),
-            announced: false,
         }
     }
 
-    fn on_env(&mut self, env: EnvData) -> Option<Notification> {
-        self.latest = Some(env);
+    fn on_env(&mut self, env: EnvData, now: Instant) -> Option<Notification> {
+        self.latest = Some((env, now));
 
-        if !self.cold && env.temperature < self.config.tg_min_c {
-            self.cold = true;
-            self.last_alarm = Instant::now();
-            return Some(Notification::loud(self.alarm_text(&env)));
+        let crossed = if self.cold {
+            env.temperature > self.config.tg_clear_c
+        } else {
+            env.temperature < self.config.tg_min_c
+        };
+
+        // Only a recovery dwells: delaying an alarm would lose a short excursion, not space it.
+        let dwelling = self.cold
+            && self
+                .config
+                .tg_dwell
+                .zip(self.last_flip)
+                .is_some_and(|(dwell, at)| now < at + dwell);
+
+        if !crossed || dwelling {
+            return None;
         }
 
-        if self.cold && env.temperature > self.config.tg_clear_c {
-            self.cold = false;
-            return Some(Notification::loud(format!(
+        self.cold = !self.cold;
+        self.last_flip = Some(now);
+        self.last_alarm = now;
+
+        let text = if self.cold {
+            self.alarm_text(&env)
+        } else {
+            format!(
                 "Recovered: {:.1}C, back above {:.1}C",
                 env.temperature, self.config.tg_clear_c
-            )));
-        }
-
-        None
+            )
+        };
+        Some(self.speak(Notification::alarm(text), now))
     }
 
     /// One line on the first connection after boot, so a reboot loop shows up in the chat
     /// instead of hiding behind the heartbeat interval.
-    fn on_wifi(&mut self, state: WifiState) -> Option<Notification> {
+    fn on_wifi(&mut self, state: WifiState, now: Instant) -> Option<Notification> {
         let WifiState::Connected { ssid, .. } = state else {
+            // Or the next heartbeat would name a network the device has left.
+            self.ssid = None;
             return None;
         };
 
@@ -120,10 +139,8 @@ impl App {
         }
         self.announced = true;
 
-        Some(Notification::silent(format!(
-            "{} started",
-            env!("CARGO_PKG_NAME")
-        )))
+        let text = format!("{} started", env!("CARGO_PKG_NAME"));
+        Some(self.speak(Notification::info(text), now))
     }
 
     /// When the next message comes due with no event to prompt it.
@@ -142,19 +159,51 @@ impl App {
             && now >= self.last_alarm + every
         {
             self.last_alarm = now;
-            return self
-                .latest
-                .map(|env| Notification::loud(self.alarm_text(&env)));
+
+            // No elapsed span: a loud message waits for the link and would read as current.
+            let text = match self.reading(now) {
+                Some(env) => self.alarm_text(&env),
+                None => format!(
+                    "ALARM: still below the {:.1}C threshold, and the sensor has gone quiet",
+                    self.config.tg_min_c
+                ),
+            };
+            return Some(self.speak(Notification::alarm(text), now));
         }
 
-        if let Some(every) = self.config.tg_heartbeat
-            && self.next_heartbeat.is_some_and(|due| now >= due)
-        {
-            self.next_heartbeat = Some(now + every);
-            return Some(Notification::silent(self.heartbeat_text()).no_retry());
+        if self.next_heartbeat.is_some_and(|due| now >= due) {
+            // Proof of life only counts when it lands, and nothing lands without a link.
+            if self.ssid.is_none() {
+                self.next_heartbeat = Some(now + LINK_RETRY);
+                return None;
+            }
+
+            let message = match self.reading(now) {
+                Some(env) => Notification::perishable(self.heartbeat_text(&env, now)),
+                // No reading means no alarm can fire, which is worth waking someone for.
+                None => Notification::alarm(format!(
+                    "ALARM: no sensor reading for over {} minutes",
+                    SENSOR_TIMEOUT.as_secs() / 60
+                )),
+            };
+            return Some(self.speak(message, now));
         }
 
         None
+    }
+
+    /// Every message is proof of life, so the heartbeat is due again from here.
+    fn speak(&mut self, message: Notification, now: Instant) -> Notification {
+        if let Some(every) = self.config.tg_heartbeat {
+            self.next_heartbeat = Some(now + every);
+        }
+        message
+    }
+
+    fn reading(&self, now: Instant) -> Option<EnvData> {
+        self.latest
+            .filter(|(_, at)| now < *at + SENSOR_TIMEOUT)
+            .map(|(env, _)| env)
     }
 
     fn alarm_text(&self, env: &EnvData) -> String {
@@ -164,23 +213,21 @@ impl App {
         )
     }
 
-    fn heartbeat_text(&self) -> String {
-        // Worth saying out loud: the device is up but the sensor is not.
-        let reading = match self.latest {
-            Some(env) => format!(
-                "{:.1}C, {:.0}%RH, {:.0}hPa",
-                env.temperature, env.humidity, env.pressure
-            ),
-            None => String::from("no sensor reading"),
-        };
-        let up = self.boot.elapsed().as_secs();
+    fn heartbeat_text(&self, env: &EnvData, now: Instant) -> String {
         let wifi = self.ssid.map(|ssid| format!(", wifi {ssid}"));
 
         format!(
-            "alive - {reading}, up {}h{:02}m{}",
-            up / 3600,
-            (up % 3600) / 60,
+            "alive - {:.1}C, {:.0}%RH, {:.0}hPa, up {}{}",
+            env.temperature,
+            env.humidity,
+            env.pressure,
+            hhmm(now - self.boot),
             wifi.unwrap_or_default()
         )
     }
+}
+
+fn hhmm(span: Duration) -> String {
+    let secs = span.as_secs();
+    format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
 }

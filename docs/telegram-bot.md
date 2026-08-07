@@ -5,7 +5,17 @@ The firmware pushes two kinds of message to one Telegram chat:
 - a **loud** alarm when the temperature falls below `TG_MIN_C`, repeated every `TG_REPEAT_MIN`
   while it stays there, and a loud "recovered" line once it climbs back above
   `TG_MIN_C + TG_HYST_C`;
-- a **silent** heartbeat every `TG_HEARTBEAT_MIN` carrying the current reading.
+- a **silent** heartbeat every `TG_HEARTBEAT_MIN` carrying the current reading — sent **loud**,
+  as `no sensor reading for over 5 minutes`, when the ENV-Pro has stopped answering, because a
+  device with no reading cannot raise an alarm at all.
+
+An alarm is never held back, but a recovery has to wait out `TG_DWELL_MIN`: `TG_HYST_C` keeps a
+steady temperature from chattering, and the dwell caps a swinging one at one alarm per interval
+instead of one per 5-second sample. Delaying the alarm instead would lose a short excursion
+outright, which is the one thing this device exists to catch.
+
+Neither the loud alarm nor the loud sensor-silent line carries an elapsed span, on purpose: a
+loud message waits for the link, so "silent for 5m" would arrive reading as current.
 
 The heartbeat exists because an alarm-only device is indistinguishable from a dead one — no
 power, no Wi-Fi, a crashed task and "everything is fine" all look the same from the chat. Be
@@ -103,6 +113,7 @@ Secrets live in `.env`; everything else is a build setting in `.cargo/config.tom
 | `TELEGRAM_CHAT_ID` | `.env` | — | your chat id (negative for groups) |
 | `TG_MIN_C` | `.cargo/config.toml` | `10.0` | alarm below this, in °C |
 | `TG_HYST_C` | `.cargo/config.toml` | `1.0` | recovery at `TG_MIN_C + TG_HYST_C` |
+| `TG_DWELL_MIN` | `.cargo/config.toml` | `5` | minutes an alarm stands before a recovery can clear it; `0` clears at once |
 | `TG_REPEAT_MIN` | `.cargo/config.toml` | `60` | minutes between repeats of a standing alarm; `0` sends it once |
 | `TG_HEARTBEAT_MIN` | `.cargo/config.toml` | `360` | minutes between silent heartbeats; `0` turns them off |
 
@@ -118,6 +129,16 @@ chat — see step 10 for how to burn it.
 
 Roughly 1 message/second to a single chat and ~30/s overall; exceeding that returns `429` with
 a `retry_after`. This design sends a handful of messages a day, nowhere near the limit.
+
+A loud message waits for the link and is then retried for about a quarter of an hour (5 s, 15 s,
+then 45 s between attempts), so a long outage delays an alarm rather than losing it. It does
+give up in the end: when the *chat* is what refuses — a stale `chat_id`, a blocked bot — every
+message behind it would otherwise be starved, and a standing alarm is repeated anyway.
+
+A silent one gets three attempts, and the heartbeat none at all — it is dropped outright while
+the link is down, since an "alive" line that arrives hours late reads as current and is worse
+than no line. The interval is not spent on it, though: a heartbeat that comes due with the link
+down is not composed at all, and goes out within a minute of Wi-Fi coming back.
 
 ## 10. Rotate or revoke
 
@@ -161,9 +182,12 @@ temperature counts as "below threshold"), then `cargo run` and watch for:
 - a silent heartbeat about a minute later;
 - one blue blink on the RGB LED per successful send, two yellow blinks per failure.
 
-Cup a warm hand over the sensor (or set `TG_MIN_C=5`) and confirm the loud recovery fires once,
-and that a temperature hovering at the threshold does not chatter — that is what `TG_HYST_C` is
-for. Pull the router mid-run: sends must fail with a yellow double-blink and a `warn!`, the task
-must not panic, and the deferred message must go out once Wi-Fi returns.
+Cup a warm hand over the sensor (or set `TG_MIN_C=5`) and confirm the loud recovery fires once —
+five minutes after the alarm at the earliest, which is `TG_DWELL_MIN` doing its job. Unplug the
+ENV-Pro and wait: the next heartbeat must arrive loud, saying `no sensor reading for over 5
+minutes`. Pull the router mid-run: sends must fail with a yellow double-blink and a `warn!`, the
+task must not panic, and a deferred *alarm* must go out once Wi-Fi returns — a heartbeat already
+in flight is meant to be dropped, and logs `link down, dropping`, while one that comes due with
+the link down is skipped and sent on reconnect instead.
 
 Restore the real `TG_MIN_C` / `TG_HEARTBEAT_MIN` values before the final flash.

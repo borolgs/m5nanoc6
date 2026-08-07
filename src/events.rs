@@ -13,21 +13,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub, signal:
 pub enum Event {
     ButtonUp,
     ButtonDown,
-    Env(EnvData),
     Wifi(WifiState),
-}
-
-/// One ENV-Pro reading.
-#[derive(Debug, Clone, Copy)]
-pub struct EnvData {
-    /// °C
-    pub temperature: f32,
-    /// %RH
-    pub humidity: f32,
-    /// hPa
-    pub pressure: f32,
-    /// Ohm
-    pub gas_resistance: Option<f32>,
 }
 
 /// Where the Wi-Fi station is in its connect cycle.

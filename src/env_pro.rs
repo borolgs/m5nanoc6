@@ -1,11 +1,21 @@
+//! Unit ENV-Pro (BME688) on the Grove port, over I2C.
+//!
+//! A reading is state, not an event: only the latest one means anything, and a reader that
+//! starts late — or misses a sample — wants the current value, not a queue of old ones. So
+//! [`env_pro_task`] publishes into a [`Watch`], where [`Receiver::try_get`] hands a late
+//! arrival the last reading straight away instead of the next sample interval of nothing.
+//!
+//! A failed read re-initializes the sensor, so the unit can be unplugged and plugged back in.
+
 use bosch_bme680::{AsyncBme680, Configuration, DeviceAddress, MeasurmentData};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    watch::{Receiver, Watch},
+};
 use embassy_time::{Delay, Duration, Timer};
 use esp_hal::{Async, i2c::master::I2c};
 
-use crate::{
-    events::{self, EnvData, Event},
-    led::{self, LedCmd, Rgb},
-};
+use crate::led::{self, LedCmd, Rgb};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -13,21 +23,35 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// Seed for the heater-resistance calculation; the driver self-corrects after the first read.
 const INITIAL_AMBIENT_C: i32 = 20;
 
-impl From<MeasurmentData> for EnvData {
-    fn from(data: MeasurmentData) -> Self {
-        Self {
-            temperature: data.temperature,
-            humidity: data.humidity,
-            // `bosch-bme680` documents this as hPa, but the compensation formula returns Pa.
-            pressure: data.pressure / 100.0,
-            gas_resistance: data.gas_resistance,
-        }
-    }
+/// `app_task`, plus one spare.
+const RECEIVERS: usize = 2;
+
+static READINGS: Watch<CriticalSectionRawMutex, EnvData, RECEIVERS> = Watch::new();
+
+/// Follow the readings. Panics past `RECEIVERS` — a boot-time failure in the module that
+/// added the receiver.
+pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, EnvData, RECEIVERS> {
+    READINGS
+        .receiver()
+        .expect("too many ENV-Pro receivers: raise RECEIVERS")
+}
+
+/// One ENV-Pro reading.
+#[derive(Debug, Clone, Copy)]
+pub struct EnvData {
+    /// °C
+    pub temperature: f32,
+    /// %RH
+    pub humidity: f32,
+    /// hPa
+    pub pressure: f32,
+    /// Ohm
+    pub gas_resistance: Option<f32>,
 }
 
 #[embassy_executor::task]
 pub async fn env_pro_task(i2c: I2c<'static, Async>) {
-    let publisher = events::publisher();
+    let readings = READINGS.sender();
     let mut sensor = AsyncBme680::new(i2c, DeviceAddress::Secondary, Delay, INITIAL_AMBIENT_C);
     let config = Configuration::default();
 
@@ -43,7 +67,7 @@ pub async fn env_pro_task(i2c: I2c<'static, Async>) {
         loop {
             match sensor.measure().await {
                 Ok(data) => {
-                    publisher.publish_immediate(Event::Env(data.into()));
+                    readings.send(data.into());
                     led::send(LedCmd::blink(Rgb::GREEN, 1));
                 }
                 Err(e) => {
@@ -54,6 +78,18 @@ pub async fn env_pro_task(i2c: I2c<'static, Async>) {
                 }
             }
             Timer::after(SAMPLE_INTERVAL).await;
+        }
+    }
+}
+
+impl From<MeasurmentData> for EnvData {
+    fn from(data: MeasurmentData) -> Self {
+        Self {
+            temperature: data.temperature,
+            humidity: data.humidity,
+            // `bosch-bme680` documents this as hPa, but the compensation formula returns Pa.
+            pressure: data.pressure / 100.0,
+            gas_resistance: data.gas_resistance,
         }
     }
 }
